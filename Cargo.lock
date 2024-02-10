@@ -1928,6 +1928,7 @@ dependencies = [
 name = "wuffblob"
 version = "0.1.0"
 dependencies = [
+ "azure_core",
  "azure_storage",
  "azure_storage_blobs",
  "azure_storage_datalake",

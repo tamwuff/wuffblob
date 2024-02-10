@@ -5,8 +5,6 @@ pub struct WuffBlobError {
     pub message: String,
 }
 
-pub type WuffBlobResult = Result<(), WuffBlobError>;
-
 impl std::fmt::Display for WuffBlobError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         write!(f, "{}", self.message)
@@ -34,5 +32,21 @@ impl From<&String> for WuffBlobError {
 impl From<String> for WuffBlobError {
     fn from(message: String) -> WuffBlobError {
         WuffBlobError { message: message }
+    }
+}
+
+impl From<&azure_core::error::Error> for WuffBlobError {
+    fn from(err: &azure_core::error::Error) -> WuffBlobError {
+        WuffBlobError {
+            message: format!("{:?}", err),
+        }
+    }
+}
+
+impl From<azure_core::error::Error> for WuffBlobError {
+    fn from(err: azure_core::error::Error) -> WuffBlobError {
+        WuffBlobError {
+            message: format!("{:?}", err),
+        }
     }
 }

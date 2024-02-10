@@ -1,9 +1,9 @@
+#[derive(Debug)]
 pub struct Ctx<'a> {
     pub verbose: bool,
     pub dry_run: bool,
     pub async_spawner: &'a tokio::runtime::Handle,
-    pub container_client: azure_storage_blobs::prelude::ContainerClient,
-    pub data_lake_client: azure_storage_datalake::clients::FileSystemClient,
+    pub azure_client: crate::azure::AzureClient,
 }
 
 pub fn make_tokio_runtime() -> tokio::runtime::Runtime {
@@ -64,11 +64,7 @@ impl<'a> Ctx<'a> {
             verbose: *(matches.get_one::<bool>("verbose").unwrap()),
             dry_run: *(matches.get_one::<bool>("dry_run").unwrap()),
             async_spawner: tokio_runtime.handle(),
-            container_client: azure_storage_blobs::prelude::ClientBuilder::new(
-                storage_account,
-                azure_storage::StorageCredentials::access_key(storage_account, access_key.clone())).container_client(container),
-            data_lake_client: azure_storage_datalake::clients::DataLakeClientBuilder::new(storage_account,
-                azure_storage::StorageCredentials::access_key(storage_account, access_key)).build().file_system_client(container),
+            azure_client: crate::azure::AzureClient::new(storage_account, &access_key, container),
         }
     }
 }
