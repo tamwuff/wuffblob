@@ -31,17 +31,78 @@
 //   - content language
 //   - access tier
 //
-// I am using unbounded queues everywhere, primarily because a full run in
-// non-preen mode could take hours, and I don't want the list-blobs operation
-// to time out if we don't request the next page for hours. Mitigating factor:
-// preen mode will only add things to the queue if there is something wrong
-// with them, so preen mode should use way way less memory. Non-preen mode
-// will be more of a memory hog and that's just life.
+// Using unbounded queues is scary because infinite memory usage. But using
+// bounded queues is scary too, because the whole thing is being driven by
+// a recursive list operation and it might have some kind of session token
+// in it that could time out if we don't ask for the next chunk for too long
+// a period of time.
+//
+// I don't think there's really a choice. Unbounded isn't an option. So I
+// am going to use bounded queues everywhere with a relatively small size
+// (~= 1000 elements) and we will just have to hope that the recursive list
+// operations don't time out.
+//
+// Something that should be a mitigating factor in preen mode, is that in
+// preen mode we will only add things to a queue if there is something
+// demonstrably wrong with them. So not too many things should even end up
+// in a queue (or waiting to get into a queue) in the first place. And I guess
+// for non-preen mode you just have to run it from a machine with a fast pipe
+// to Azure, so that the hashing goes fast, and you probably have to pass -n
+// or -y, so that the UI goes fast.
+
+#[derive(Debug, Clone)]
+struct FsckStats {
+    files_found: u64,
+    dirs_found: u64,
+    done_listing: bool,
+    any_not_repaired: bool,
+    user_input_required: u64,
+    user_input_complete: u64,
+    hash_required: u64,
+    hash_complete: u64,
+    hash_bytes_required: u64,
+    hash_bytes_complete: u64,
+    propupd_required: u64,
+    propupd_complete: u64,
+}
+
+impl FsckStats {
+    fn new() -> FsckStats {
+        FsckStats {
+            files_found: 0u64,
+            dirs_found: 0u64,
+            done_listing: false,
+            any_not_repaired: false,
+            user_input_required: 0u64,
+            user_input_complete: 0u64,
+            hash_required: 0u64,
+            hash_complete: 0u64,
+            hash_bytes_required: 0u64,
+            hash_bytes_complete: 0u64,
+            propupd_required: 0u64,
+            propupd_complete: 0u64,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct FsckCtx {
     preen: bool,
     yes: bool,
+    stats: std::sync::Mutex<FsckStats>,
+}
+
+impl FsckCtx {
+    fn get_stats(&self) -> FsckStats {
+        self.stats.lock().expect("stats").clone()
+    }
+
+    fn mutate_stats<F>(&self, cb: F)
+    where
+        F: FnOnce(&mut FsckStats),
+    {
+        cb(&mut self.stats.lock().expect("stats"));
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -61,15 +122,12 @@ struct ProposedRepair {
 
 #[derive(Debug, Clone)]
 enum FileCheckerState {
-    // I don't need to be put into any queue. This file (or directory) is good.
-    Ok,
+    // I don't need to be put into any queue. Terminal state.
+    Terminal,
 
-    // I don't need to be put into any queue. We can't fix it.
-    NotRepairable(String),
-
-    // I don't need to be put into any queue. We could have fixed it, but the
-    // user told us not to.
-    NotRepaired,
+    // Please put me into the user-interface queue. I don't need any response
+    // from the user, but I would like a message to be printed.
+    Message(String),
 
     // Please put me into the user-interface queue. We can fix this, but we
     // need to keep the user informed and/or ask them whether to go ahead.
@@ -92,40 +150,44 @@ struct FileChecker {
     empirical_md5: Option<[u8; 16]>,
     possible_repairs: Vec<ProposedRepair>,
     authorized_repairs: Vec<RepairType>,
-    any_repairs_declined: bool,
 }
 
 impl FileChecker {
     fn new(
         ctx: &std::sync::Arc<wuffblob::ctx::Ctx>,
         fsck_ctx: &std::sync::Arc<FsckCtx>,
-        name: &str,
+        path: wuffblob::wuffpath::WuffPath,
         is_dir: bool,
         properties: azure_storage_blobs::blob::BlobProperties,
     ) -> FileChecker {
-        let path: wuffblob::wuffpath::WuffPath =
-            wuffblob::wuffpath::WuffPath::from_osstr(std::ffi::OsStr::new(name));
-        let desired_content_type: &'static str = ctx.get_desired_mime_type(&path);
         let mut checker: FileChecker = FileChecker {
             path: path,
-            desired_content_type: desired_content_type,
+            desired_content_type: "",
             is_dir: is_dir,
             properties: properties,
-            state: FileCheckerState::Ok,
+            state: FileCheckerState::Terminal,
             empirical_md5: None,
             possible_repairs: Vec::<ProposedRepair>::new(),
             authorized_repairs: Vec::<RepairType>::new(),
-            any_repairs_declined: false,
         };
         if !checker.path.is_canonical() {
-            checker.state =
-                FileCheckerState::NotRepairable("path is not in canonical form".to_string());
+            checker.state = FileCheckerState::Message("path is not in canonical form".to_string());
+            fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                stats.any_not_repaired = true;
+            });
         } else if checker.is_dir {
             // not much else to check!
-        } else if checker.properties.content_md5.is_none() || !fsck_ctx.preen {
-            checker.state = FileCheckerState::Hash;
         } else {
-            checker.analyze(ctx, fsck_ctx);
+            checker.desired_content_type = ctx.get_desired_mime_type(&checker.path);
+            if checker.properties.content_md5.is_none() || !fsck_ctx.preen {
+                checker.state = FileCheckerState::Hash;
+                fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                    stats.hash_required += 1u64;
+                    stats.hash_bytes_required += checker.properties.content_length;
+                });
+            } else {
+                checker.analyze(ctx, fsck_ctx);
+            }
         }
         checker
     }
@@ -141,17 +203,44 @@ impl FileChecker {
                 self.authorized_repairs
                     .push(possible_repair.repair_type.clone());
             } else {
-                self.any_repairs_declined = true;
+                fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                    stats.any_not_repaired = true;
+                });
             }
             if let Some(next_possible_repair) = self.possible_repairs.pop() {
                 self.state = FileCheckerState::UserInteraction(next_possible_repair);
             } else if !self.authorized_repairs.is_empty() {
                 self.state = FileCheckerState::UpdateProperties;
-            } else if self.any_repairs_declined {
-                self.state = FileCheckerState::NotRepaired;
+                fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                    stats.user_input_complete += 1u64;
+                    stats.propupd_required += 1u64;
+                });
             } else {
-                self.state = FileCheckerState::Ok;
+                self.state = FileCheckerState::Terminal;
+                fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                    stats.user_input_complete += 1u64;
+                });
             }
+        } else {
+            panic!(
+                "State is {:?}, expected FileCheckerState::UserInteraction",
+                &self.state
+            );
+        }
+    }
+
+    fn message_printed(
+        &mut self,
+        ctx: &std::sync::Arc<wuffblob::ctx::Ctx>,
+        fsck_ctx: &std::sync::Arc<FsckCtx>,
+    ) {
+        if let FileCheckerState::Message(_) = &self.state {
+            self.state = FileCheckerState::Terminal;
+        } else {
+            panic!(
+                "State is {:?}, expected FileCheckerState::Message",
+                &self.state
+            );
         }
     }
 
@@ -160,15 +249,23 @@ impl FileChecker {
         ctx: &std::sync::Arc<wuffblob::ctx::Ctx>,
         fsck_ctx: &std::sync::Arc<FsckCtx>,
     ) {
-        if let FileCheckerState::Hash = self.state {
+        if let FileCheckerState::Hash = &self.state {
         } else {
-            return;
+            panic!(
+                "State is {:?}, expected FileCheckerState::Hash",
+                &self.state
+            );
         }
 
         let maybe_filename_as_string: Result<String, std::ffi::OsString> =
             self.path.to_osstring().into_string();
         if maybe_filename_as_string.is_err() {
-            self.state = FileCheckerState::NotRepairable("path is not valid unicode".to_string());
+            self.state = FileCheckerState::Message("path is not valid unicode".to_string());
+            fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                stats.any_not_repaired = true;
+                stats.hash_required -= 1u64;
+                stats.hash_bytes_required -= self.properties.content_length;
+            });
             return;
         }
         let blob_client = ctx
@@ -177,6 +274,8 @@ impl FileChecker {
             .blob_client(maybe_filename_as_string.unwrap());
         let mut chunks_stream = blob_client.get().into_stream();
         let mut hasher: md5::Md5 = <md5::Md5 as md5::Digest>::new();
+        let expected_len: u64 = self.properties.content_length;
+        let mut num_bytes_hashed: u64 = 0u64;
         while let Some(maybe_chunk) = futures::stream::StreamExt::next(&mut chunks_stream).await {
             match maybe_chunk {
                 Ok(chunk) => {
@@ -186,20 +285,50 @@ impl FileChecker {
                     {
                         match maybe_buf {
                             Ok(buf) => {
+                                let buf_len: usize = buf.len();
                                 <md5::Md5 as md5::Digest>::update(&mut hasher, buf);
+                                num_bytes_hashed += buf_len as u64;
+                                fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                                    stats.hash_bytes_complete += buf_len as u64;
+                                });
                             }
                             Err(err) => {
-                                self.state = FileCheckerState::NotRepairable(format!("{:?}", err));
+                                self.state = FileCheckerState::Message(format!("{:?}", err));
+                                fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                                    stats.any_not_repaired = true;
+                                    stats.hash_bytes_complete -= num_bytes_hashed;
+                                    stats.hash_required -= 1u64;
+                                    stats.hash_bytes_required -= expected_len;
+                                });
                                 return;
                             }
                         }
                     }
                 }
                 Err(err) => {
-                    self.state = FileCheckerState::NotRepairable(format!("{:?}", err));
+                    self.state = FileCheckerState::Message(format!("{:?}", err));
+                    fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                        stats.any_not_repaired = true;
+                        stats.hash_bytes_complete -= num_bytes_hashed;
+                        stats.hash_required -= 1u64;
+                        stats.hash_bytes_required -= expected_len;
+                    });
                     return;
                 }
             }
+        }
+        if num_bytes_hashed != expected_len {
+            self.state = FileCheckerState::Message(format!(
+                "Expected {} bytes, got {} instead",
+                expected_len, num_bytes_hashed
+            ));
+            fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                stats.any_not_repaired = true;
+                stats.hash_bytes_complete -= num_bytes_hashed;
+                stats.hash_required -= 1u64;
+                stats.hash_bytes_required -= expected_len;
+            });
+            return;
         }
         self.empirical_md5 = Some(
             <md5::Md5 as md5::Digest>::finalize(hasher)
@@ -207,6 +336,10 @@ impl FileChecker {
                 .try_into()
                 .unwrap(),
         );
+        fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+            stats.hash_complete += 1;
+        });
+        self.analyze(ctx, fsck_ctx);
     }
 
     async fn do_update_properties(
@@ -216,11 +349,28 @@ impl FileChecker {
     ) {
         if let FileCheckerState::UpdateProperties = self.state {
         } else {
-            return;
+            panic!(
+                "State is {:?}, expected FileCheckerState::UpdateProperties",
+                &self.state
+            );
         }
         if self.authorized_repairs.is_empty() {
+            panic!("do_update_properties(): no repairs authorized");
+        }
+        let maybe_filename_as_string: Result<String, std::ffi::OsString> =
+            self.path.to_osstring().into_string();
+        if maybe_filename_as_string.is_err() {
+            self.state = FileCheckerState::Message("path is not valid unicode".to_string());
+            fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                stats.any_not_repaired = true;
+                stats.propupd_required -= 1;
+            });
             return;
         }
+        let blob_client = ctx
+            .azure_client
+            .container_client
+            .blob_client(maybe_filename_as_string.unwrap());
         for repair_type in &self.authorized_repairs {
             match repair_type {
                 RepairType::ContentType => {
@@ -245,6 +395,28 @@ impl FileChecker {
                         .into();
                     }
                 }
+            }
+        }
+
+        match blob_client
+            .set_properties()
+            .set_from_blob_properties(self.properties.clone())
+            .into_future()
+            .await
+        {
+            Ok(_) => {
+                self.state = FileCheckerState::Terminal;
+                fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                    stats.propupd_complete += 1;
+                });
+            }
+            Err(err) => {
+                self.state = FileCheckerState::Message(format!("{:?}", err));
+                fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                    stats.any_not_repaired = true;
+                    stats.propupd_required -= 1;
+                });
+                return;
             }
         }
     }
@@ -313,8 +485,11 @@ impl FileChecker {
         }
         if let Some(possible_repair) = self.possible_repairs.pop() {
             self.state = FileCheckerState::UserInteraction(possible_repair);
+            fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                stats.user_input_required += 1;
+            });
         } else {
-            self.state = FileCheckerState::Ok;
+            self.state = FileCheckerState::Terminal;
         }
     }
 }
@@ -322,89 +497,144 @@ impl FileChecker {
 async fn hasher(
     ctx: std::sync::Arc<wuffblob::ctx::Ctx>,
     fsck_ctx: std::sync::Arc<FsckCtx>,
-    mut hasher_reader: tokio::sync::mpsc::UnboundedReceiver<FileChecker>,
-    ui_writer: std::sync::mpsc::Sender<FileChecker>,
-) {
+    mut hasher_reader: tokio::sync::mpsc::Receiver<FileChecker>,
+    ui_writer: tokio::sync::mpsc::Sender<Option<FileChecker>>,
+) -> Result<(), wuffblob::error::WuffBlobError> {
+    let conc_mgr = ctx.data_concurrency_mgr::<FileChecker>();
     while let Some(mut file_checker) = hasher_reader.recv().await {
         if let FileCheckerState::Hash = &file_checker.state {
-            file_checker.do_hash(&ctx, &fsck_ctx).await
+        } else {
+            return Err(format!(
+                "State is {:?}, expected FileCheckerState::Hash",
+                &file_checker.state
+            ).into());
         }
-        match &file_checker.state {
-            FileCheckerState::Ok | FileCheckerState::NotRepaired => {}
+        let ctx_for_task: std::sync::Arc<wuffblob::ctx::Ctx> =
+            std::sync::Arc::<wuffblob::ctx::Ctx>::clone(&ctx);
+        let fsck_ctx_for_task: std::sync::Arc<FsckCtx> =
+            std::sync::Arc::<FsckCtx>::clone(&fsck_ctx);
+        let fut = async move {
+            file_checker
+                .do_hash(&ctx_for_task, &fsck_ctx_for_task)
+                .await;
+            file_checker
+        };
+        for maybe_file_checker in conc_mgr.spawn(&ctx, fut).await {
+            let file_checker: FileChecker = maybe_file_checker?;
+            match &file_checker.state {
+                FileCheckerState::Message(_) | FileCheckerState::UserInteraction(_) => {
+                    ui_writer
+                        .send(Some(file_checker))
+                        .await?;
+                }
 
-            FileCheckerState::NotRepairable(_) | FileCheckerState::UserInteraction(_) => {
-                ui_writer.send(file_checker).expect("UI thread died");
-            }
-
-            _ => {
-                panic!("unknown file checker state in hasher task");
+                _ => {
+                    return Err(format!(
+                        "unexpected file checker state {:?} in hasher task",
+                        &file_checker.state
+                    ).into());
+                }
             }
         }
     }
+    for maybe_file_checker in conc_mgr.drain().await {
+        let file_checker: FileChecker = maybe_file_checker?;
+        match &file_checker.state {
+            FileCheckerState::Message(_) | FileCheckerState::UserInteraction(_) => {
+                ui_writer
+                    .send(Some(file_checker))
+                    .await?;
+            }
+
+            _ => {
+                return Err(format!(
+                    "unexpected file checker state {:?} in hasher task",
+                    &file_checker.state
+                ).into());
+            }
+        }
+    }
+    Ok(())
 }
 
+// The UI thread takes Option<FileChecker> rather than FileChecker. Sending
+// it a None means that the hasher is complete, and it should drop its
+// writer so that the properties updater gets an EOF. The UI thread will
+// stay running, but after that point all it is expecting to receive is
+// plain Messages.
 fn ui(
     ctx: std::sync::Arc<wuffblob::ctx::Ctx>,
     fsck_ctx: std::sync::Arc<FsckCtx>,
-    ui_reader: std::sync::mpsc::Receiver<FileChecker>,
-    propupd_writer: tokio::sync::mpsc::UnboundedSender<FileChecker>,
+    mut ui_reader: tokio::sync::mpsc::Receiver<Option<FileChecker>>,
+    propupd_writer: tokio::sync::mpsc::Sender<FileChecker>,
 ) {
-    while let Ok(mut file_checker) = ui_reader.recv() {
-        let name: std::ffi::OsString = file_checker.path.to_osstring();
-        loop {
-            match &file_checker.state {
-                FileCheckerState::Ok | FileCheckerState::NotRepaired => {
-                    break;
-                }
-                FileCheckerState::NotRepairable(msg) => {
-                    println!("{:?}: {}", name, msg);
-                    break;
-                }
-                FileCheckerState::UserInteraction(proposed_repair) => {
-                    print!("{:?}: {}", name, proposed_repair.problem_statement);
-                    if ctx.dry_run {
-                        print!("\n{}? no\n\n", proposed_repair.question);
-                        file_checker.user_input(&ctx, &fsck_ctx, false);
-                    } else if fsck_ctx.preen {
-                        println!(" ({})", proposed_repair.action);
-                        file_checker.user_input(&ctx, &fsck_ctx, true);
-                    } else if fsck_ctx.yes {
-                        print!("\n{}? yes\n\n", proposed_repair.question);
-                        file_checker.user_input(&ctx, &fsck_ctx, true);
-                    } else {
-                        print!("\n{}? [yn]", proposed_repair.question);
-                        std::io::Write::flush(&mut std::io::stdout().lock()).expect("stdout");
-                        let mut answer: bool = false;
-                        loop {
-                            let mut s = String::new();
-                            if let Ok(_) =
-                                std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut s)
-                            {
-                                s = String::from(s.trim());
-                                if s.eq_ignore_ascii_case("y") {
-                                    answer = true;
-                                    break;
-                                } else if s.eq_ignore_ascii_case("n") {
-                                    answer = false;
-                                    break;
+    // Turn our properties-update writer into an Option so that we can drop
+    // it when we need to
+    let mut maybe_propupd_writer: Option<tokio::sync::mpsc::Sender<FileChecker>> =
+        Some(propupd_writer);
+    while let Some(mut maybe_file_checker) = ui_reader.blocking_recv() {
+        if let Some(mut file_checker) = maybe_file_checker {
+            let name: std::ffi::OsString = file_checker.path.to_osstring();
+            loop {
+                match &file_checker.state {
+                    FileCheckerState::Terminal => {
+                        break;
+                    }
+                    FileCheckerState::Message(msg) => {
+                        println!("{:?}: {}", name, msg);
+                        file_checker.message_printed(&ctx, &fsck_ctx);
+                    }
+                    FileCheckerState::UserInteraction(proposed_repair) => {
+                        print!("{:?}: {}", name, proposed_repair.problem_statement);
+                        if ctx.dry_run {
+                            print!("\n{}? no\n\n", proposed_repair.question);
+                            file_checker.user_input(&ctx, &fsck_ctx, false);
+                        } else if fsck_ctx.preen {
+                            println!(" ({})", proposed_repair.action);
+                            file_checker.user_input(&ctx, &fsck_ctx, true);
+                        } else if fsck_ctx.yes {
+                            print!("\n{}? yes\n\n", proposed_repair.question);
+                            file_checker.user_input(&ctx, &fsck_ctx, true);
+                        } else {
+                            print!("\n{}? [yn]", proposed_repair.question);
+                            std::io::Write::flush(&mut std::io::stdout().lock()).expect("stdout");
+                            let answer: bool = loop {
+                                let mut s = String::new();
+                                if let Ok(_) = std::io::BufRead::read_line(
+                                    &mut std::io::stdin().lock(),
+                                    &mut s,
+                                ) {
+                                    s = String::from(s.trim());
+                                    if s.eq_ignore_ascii_case("y") {
+                                        break true;
+                                    } else if s.eq_ignore_ascii_case("n") {
+                                        break false;
+                                    }
+                                } else {
+                                    return;
                                 }
-                            } else {
-                                return;
-                            }
+                            };
+                            file_checker.user_input(&ctx, &fsck_ctx, answer);
                         }
-                        file_checker.user_input(&ctx, &fsck_ctx, answer);
+                    }
+                    FileCheckerState::UpdateProperties => {
+                        maybe_propupd_writer
+                            .as_ref()
+                            .unwrap()
+                            .blocking_send(file_checker)
+                            .expect("Properties updater task died");
+                        break;
+                    }
+                    _ => {
+                        panic!(
+                            "unexpected file checker state {:?} in UI thread",
+                            &file_checker.state
+                        );
                     }
                 }
-                FileCheckerState::UpdateProperties => {
-                    propupd_writer
-                        .send(file_checker)
-                        .expect("Properties updater task died");
-                    break;
-                }
-                _ => {
-                    panic!("unknown file checker state in UI thread");
-                }
             }
+        } else {
+            maybe_propupd_writer = None;
         }
     }
 }
@@ -412,56 +642,97 @@ fn ui(
 async fn properties_updater(
     ctx: std::sync::Arc<wuffblob::ctx::Ctx>,
     fsck_ctx: std::sync::Arc<FsckCtx>,
-    mut propupd_reader: tokio::sync::mpsc::UnboundedReceiver<FileChecker>,
-) {
+    mut propupd_reader: tokio::sync::mpsc::Receiver<FileChecker>,
+    ui_writer: tokio::sync::mpsc::Sender<Option<FileChecker>>,
+) -> Result<(), wuffblob::error::WuffBlobError> {
+    let conc_mgr = ctx.metadata_concurrency_mgr::<FileChecker>();
     while let Some(mut file_checker) = propupd_reader.recv().await {
         if let FileCheckerState::UpdateProperties = &file_checker.state {
-            file_checker.do_update_properties(&ctx, &fsck_ctx).await
+        } else {
+            return Err(format!(
+                "State is {:?}, expected FileCheckerState::UpdateProperties",
+                &file_checker.state
+            ).into());
         }
-        match &file_checker.state {
-            FileCheckerState::Ok | FileCheckerState::NotRepaired => {}
 
-            FileCheckerState::NotRepairable(msg) => {
-                let name: std::ffi::OsString = file_checker.path.to_osstring();
-                println!("{:?}: {}", name, msg);
-            }
+        let ctx_for_task: std::sync::Arc<wuffblob::ctx::Ctx> =
+            std::sync::Arc::<wuffblob::ctx::Ctx>::clone(&ctx);
+        let fsck_ctx_for_task: std::sync::Arc<FsckCtx> =
+            std::sync::Arc::<FsckCtx>::clone(&fsck_ctx);
+        let fut = async move {
+            file_checker
+                .do_update_properties(&ctx_for_task, &fsck_ctx_for_task)
+                .await;
+            file_checker
+        };
+        for maybe_file_checker in conc_mgr.spawn(&ctx, fut).await {
+            let file_checker: FileChecker = maybe_file_checker?;
+            match &file_checker.state {
+                FileCheckerState::Terminal => {}
 
-            _ => {
-                panic!("unknown file checker state in properties updater task");
+                FileCheckerState::Message(msg) => {
+                    ui_writer
+                        .send(Some(file_checker))
+                        .await?;
+                }
+
+                _ => {
+                    return Err(format!(
+                        "unexpected file checker state {:?} in properties updater task",
+                        &file_checker.state
+                    ).into());
+                }
             }
         }
     }
+    for maybe_file_checker in conc_mgr.drain().await {
+        let file_checker: FileChecker = maybe_file_checker?;
+        match &file_checker.state {
+            FileCheckerState::Terminal => {}
+
+            FileCheckerState::Message(msg) => {
+                ui_writer
+                    .send(Some(file_checker))
+                    .await?;
+            }
+
+            _ => {
+                return Err(format!(
+                    "unexpected file checker state {:?} in properties updater task",
+                    &file_checker.state
+                ).into());
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn async_main(
     ctx: std::sync::Arc<wuffblob::ctx::Ctx>,
     fsck_ctx: std::sync::Arc<FsckCtx>,
 ) -> Result<(), wuffblob::error::WuffBlobError> {
-    // Blocking MPSC channel for sending stuff to the UI thread
-    let (ui_writer, ui_reader) = std::sync::mpsc::channel();
+    let (ui_writer, ui_reader) = tokio::sync::mpsc::channel::<Option<FileChecker>>(1000usize);
+    let (hasher_writer, hasher_reader) = tokio::sync::mpsc::channel::<FileChecker>(1000usize);
+    let (propupd_writer, propupd_reader) = tokio::sync::mpsc::channel::<FileChecker>(1000usize);
 
-    // Async MPSC channels for sending stuff to the hasher and the properties
-    // updater
-    let (hasher_writer, hasher_reader) = tokio::sync::mpsc::unbounded_channel();
-    let (propupd_writer, propupd_reader) = tokio::sync::mpsc::unbounded_channel();
-
-    // Spawn the UI thread and the hasher task first. They should be safe to
-    // run while we're listing the container's contents. I don't want to get
-    // into doing any property updates until we've gotten a clean list of the
-    // container.
-    let ui_thread: tokio::task::JoinHandle<()> =
-    {
+    let ui_thread: tokio::task::JoinHandle<()> = {
         let ctx_for_ui: std::sync::Arc<wuffblob::ctx::Ctx> =
             std::sync::Arc::<wuffblob::ctx::Ctx>::clone(&ctx);
         let fsck_ctx_for_ui: std::sync::Arc<FsckCtx> = std::sync::Arc::<FsckCtx>::clone(&fsck_ctx);
-            ctx.get_async_spawner().spawn_blocking(move || {
-                ui(ctx_for_ui, fsck_ctx_for_ui, ui_reader, propupd_writer);
-            })
+        ctx.get_async_spawner().spawn_blocking(move || {
+            ui(ctx_for_ui, fsck_ctx_for_ui, ui_reader, propupd_writer);
+        })
     };
-    let hasher_task: tokio::task::JoinHandle<()> = ctx.get_async_spawner().spawn(hasher(
+    let hasher_task = ctx.get_async_spawner().spawn(hasher(
         std::sync::Arc::<wuffblob::ctx::Ctx>::clone(&ctx),
         std::sync::Arc::<FsckCtx>::clone(&fsck_ctx),
         hasher_reader,
+        ui_writer.clone(),
+    ));
+    let propupd_task = ctx.get_async_spawner().spawn(properties_updater(
+        std::sync::Arc::<wuffblob::ctx::Ctx>::clone(&ctx),
+        std::sync::Arc::<FsckCtx>::clone(&fsck_ctx),
+        propupd_reader,
         ui_writer.clone(),
     ));
 
@@ -482,52 +753,83 @@ async fn async_main(
                         is_dir = true;
                     }
                 }
-                let file_checker: FileChecker =
-                    FileChecker::new(&ctx, &fsck_ctx, &blob.name, is_dir, blob.properties);
-                match &file_checker.state {
-                    FileCheckerState::Ok | FileCheckerState::NotRepaired => {}
+                if is_dir {
+                    fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                        stats.dirs_found += 1u64;
+                    });
+                } else {
+                    fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+                        stats.files_found += 1u64;
+                    });
+                }
+                let file_checker: FileChecker = FileChecker::new(
+                    &ctx,
+                    &fsck_ctx,
+                    wuffblob::wuffpath::WuffPath::from_osstr(std::ffi::OsStr::new(&blob.name)),
+                    is_dir,
+                    blob.properties,
+                );
+                match file_checker.state {
+                    FileCheckerState::Terminal => {}
 
-                    FileCheckerState::NotRepairable(_) | FileCheckerState::UserInteraction(_) => {
-                        ui_writer.send(file_checker).expect("UI thread died");
+                    FileCheckerState::Message(_) | FileCheckerState::UserInteraction(_) => {
+                        ui_writer
+                            .send(Some(file_checker))
+                            .await?;
                     }
 
                     FileCheckerState::Hash => {
-                        hasher_writer.send(file_checker).expect("Hasher task died");
+                        hasher_writer
+                            .send(file_checker)
+                            .await?;
                     }
 
                     _ => {
-                        panic!("unknown file checker state in main thread");
+                        panic!(
+                            "unexpected file checker state {:?} in main thread",
+                            &file_checker.state
+                        );
                     }
                 }
             }
         }
     }
 
-    drop(ui_writer);
     drop(hasher_writer);
+    hasher_task.await??;
 
-    let propupd_task: tokio::task::JoinHandle<()> =
-        ctx.get_async_spawner().spawn(properties_updater(
-            std::sync::Arc::<wuffblob::ctx::Ctx>::clone(&ctx),
-            std::sync::Arc::<FsckCtx>::clone(&fsck_ctx),
-            propupd_reader,
-        ));
+    ui_writer.send(None).await?;
+    drop(ui_writer);
+
+    propupd_task.await??;
 
     ui_thread.await?;
-    hasher_task.await?;
-    propupd_task.await?;
+
     Ok(())
 }
 
 fn main() -> Result<(), wuffblob::error::WuffBlobError> {
-    let cmdline_parser: clap::Command = wuffblob::ctx::make_cmdline_parser("wuffblob-fsck");
+    let cmdline_parser: clap::Command = wuffblob::ctx::make_cmdline_parser("wuffblob-fsck")
+        .arg(
+            clap::Arg::new("preen")
+                .long("preen")
+                .short('p')
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            clap::Arg::new("yes")
+                .long("yes")
+                .short('y')
+                .action(clap::ArgAction::SetTrue),
+        );
     let cmdline_matches: clap::ArgMatches = cmdline_parser.get_matches();
 
     let ctx: std::sync::Arc<wuffblob::ctx::Ctx> =
         std::sync::Arc::<wuffblob::ctx::Ctx>::new(wuffblob::ctx::Ctx::new(&cmdline_matches));
     let fsck_ctx: std::sync::Arc<FsckCtx> = std::sync::Arc::<FsckCtx>::new(FsckCtx {
-        preen: false,
-        yes: false,
+        preen: *(cmdline_matches.get_one::<bool>("preen").unwrap()),
+        yes: *(cmdline_matches.get_one::<bool>("yes").unwrap()),
+        stats: std::sync::Mutex::<FsckStats>::new(FsckStats::new()),
     });
     ctx.run_async_main(async_main(
         std::sync::Arc::<wuffblob::ctx::Ctx>::clone(&ctx),

@@ -66,3 +66,19 @@ impl From<tokio::task::JoinError> for WuffBlobError {
         }
     }
 }
+
+impl<T> From<&tokio::sync::mpsc::error::SendError<T>> for WuffBlobError {
+    fn from(err: &tokio::sync::mpsc::error::SendError<T>) -> WuffBlobError {
+        WuffBlobError {
+            message: format!("{:?}", err),
+        }
+    }
+}
+
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for WuffBlobError {
+    fn from(err: tokio::sync::mpsc::error::SendError<T>) -> WuffBlobError {
+        WuffBlobError {
+            message: format!("{:?}", err),
+        }
+    }
+}
