@@ -50,3 +50,19 @@ impl From<azure_core::error::Error> for WuffBlobError {
         }
     }
 }
+
+impl From<&tokio::task::JoinError> for WuffBlobError {
+    fn from(err: &tokio::task::JoinError) -> WuffBlobError {
+        WuffBlobError {
+            message: format!("{:?}", err),
+        }
+    }
+}
+
+impl From<tokio::task::JoinError> for WuffBlobError {
+    fn from(err: tokio::task::JoinError) -> WuffBlobError {
+        WuffBlobError {
+            message: format!("{:?}", err),
+        }
+    }
+}

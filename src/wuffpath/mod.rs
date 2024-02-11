@@ -98,7 +98,7 @@ impl WuffPath {
 
 impl From<&str> for WuffPath {
     fn from(s: &str) -> WuffPath {
-        WuffPath::from_osstr(AsRef::<std::ffi::OsStr>::as_ref(s))
+        WuffPath::from_osstr(std::ffi::OsStr::new(s))
     }
 }
 

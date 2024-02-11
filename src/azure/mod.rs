@@ -29,7 +29,7 @@ impl AzureClient {
 
     pub async fn inventory(
         &self,
-        ctx: &crate::ctx::Ctx<'_>,
+        ctx: &std::sync::Arc<crate::ctx::Ctx>,
     ) -> Result<crate::inventory::Inventory, crate::error::WuffBlobError> {
         let mut files: std::collections::BTreeMap<crate::wuffpath::WuffPath, crate::inventory::FileInfo> = std::collections::BTreeMap::<crate::wuffpath::WuffPath, crate::inventory::FileInfo>::new();
         let mut directories: std::collections::BTreeSet<crate::wuffpath::WuffPath> =
@@ -74,7 +74,8 @@ impl AzureClient {
             }
             println!("OK: {:#?}", &chunk);
         }
-        let additional_empty_directories: std::collections::BTreeSet<crate::wuffpath::WuffPath> = &directories - &implicit_directories;
+        let additional_empty_directories: std::collections::BTreeSet<crate::wuffpath::WuffPath> =
+            &directories - &implicit_directories;
         Ok(crate::inventory::Inventory {
             files: files,
             implicit_directories: implicit_directories,
