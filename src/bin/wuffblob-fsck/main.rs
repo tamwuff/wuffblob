@@ -810,6 +810,9 @@ async fn async_main(
             }
         }
     }
+    fsck_ctx.mutate_stats(|stats: &mut FsckStats| {
+        stats.done_listing = true;
+    });
 
     drop(hasher_writer);
     hasher_task.await??;

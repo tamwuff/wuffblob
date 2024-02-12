@@ -277,11 +277,11 @@ impl Ctx {
 
     pub fn get_desired_mime_type(&self, path: &crate::wuffpath::WuffPath) -> &'static str {
         if let Some(basename) = path.components.last() {
-        for mime_type_guesser in &self.mime_type_guessers {
-            if let Some(mime_type) = mime_type_guesser.get_desired_mime_type(basename) {
-                return mime_type;
+            for mime_type_guesser in &self.mime_type_guessers {
+                if let Some(mime_type) = mime_type_guesser.get_desired_mime_type(basename) {
+                    return mime_type;
+                }
             }
-        }
         }
         "application/octet-stream"
     }
