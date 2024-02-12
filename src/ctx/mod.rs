@@ -108,6 +108,32 @@ impl<T: std::marker::Send + 'static> BoundedParallelism<T> {
     }
 }
 
+// I looked on https://docs.rs/platforms/latest/platforms/target/enum.OS.html
+// and tried to identify any BSD-like platforms, but I may have missed some.
+#[cfg(any(
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "macos"
+))]
+fn what_is_siginfo_on_this_platform() -> tokio::signal::unix::SignalKind {
+    tokio::signal::unix::SignalKind::info()
+}
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "macos"
+    ))
+))]
+fn what_is_siginfo_on_this_platform() -> tokio::signal::unix::SignalKind {
+    tokio::signal::unix::SignalKind::user_defined1()
+}
+
 pub fn make_cmdline_parser(argv0: &'static str) -> clap::Command {
     clap::Command::new(argv0)
         .color(clap::ColorChoice::Never)
@@ -246,11 +272,12 @@ impl Ctx {
         self.tokio_runtime.block_on(f)
     }
 
+    #[cfg(unix)]
     pub fn install_siginfo_handler<F>(&self, cb: F) -> Result<(), crate::error::WuffBlobError>
     where
         F: Fn() + std::marker::Send + 'static,
     {
-        let sig_num: tokio::signal::unix::SignalKind = tokio::signal::unix::SignalKind::info();
+        let sig_num: tokio::signal::unix::SignalKind = what_is_siginfo_on_this_platform();
         let mut signal_waiter: tokio::signal::unix::Signal = tokio::signal::unix::signal(sig_num)?;
         let _ = self.get_async_spawner().spawn(async move {
             loop {
@@ -259,6 +286,13 @@ impl Ctx {
             }
         });
         Ok(())
+    }
+
+    #[cfg(not(unix))]
+    pub fn install_siginfo_handler<F>(&self, cb: F) -> Result<(), crate::error::WuffBlobError>
+    where
+        F: Fn() + std::marker::Send + 'static,
+    {
     }
 
     pub fn get_async_spawner(&self) -> &tokio::runtime::Handle {
