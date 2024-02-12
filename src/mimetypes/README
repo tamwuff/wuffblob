@@ -1,0 +1,8 @@
+The "mime.types" file comes straight from Apache:
+https://svn.apache.org/viewvc/httpd/httpd/trunk/docs/conf/mime.types?view=markup
+
+Any modifications should *not* be made in this file. The mime.types file should
+always be kept exactly as it is in upstream Apache.
+
+If there is something that it gets wrong, that change can be made in the
+"mime_overrides.regex" file. That one, we maintain locally.

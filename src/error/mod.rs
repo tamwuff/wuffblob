@@ -51,6 +51,22 @@ impl From<std::io::Error> for WuffBlobError {
     }
 }
 
+impl From<&regex::Error> for WuffBlobError {
+    fn from(err: &regex::Error) -> WuffBlobError {
+        WuffBlobError {
+            message: format!("{:?}", err),
+        }
+    }
+}
+
+impl From<regex::Error> for WuffBlobError {
+    fn from(err: regex::Error) -> WuffBlobError {
+        WuffBlobError {
+            message: format!("{:?}", err),
+        }
+    }
+}
+
 impl From<&azure_core::error::Error> for WuffBlobError {
     fn from(err: &azure_core::error::Error) -> WuffBlobError {
         WuffBlobError {

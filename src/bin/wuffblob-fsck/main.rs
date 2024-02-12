@@ -549,7 +549,7 @@ fn ui(
     // it when we need to
     let mut maybe_propupd_writer: Option<tokio::sync::mpsc::Sender<FileChecker>> =
         Some(propupd_writer);
-    while let Some(mut maybe_file_checker) = ui_reader.blocking_recv() {
+    while let Some(maybe_file_checker) = ui_reader.blocking_recv() {
         if let Some(mut file_checker) = maybe_file_checker {
             let name: std::ffi::OsString = file_checker.path.to_osstring();
             loop {
@@ -846,7 +846,7 @@ fn main() -> Result<(), wuffblob::error::WuffBlobError> {
     let cmdline_matches: clap::ArgMatches = cmdline_parser.get_matches();
 
     let ctx: std::sync::Arc<wuffblob::ctx::Ctx> =
-        std::sync::Arc::<wuffblob::ctx::Ctx>::new(wuffblob::ctx::Ctx::new(&cmdline_matches));
+        std::sync::Arc::<wuffblob::ctx::Ctx>::new(wuffblob::ctx::Ctx::new(&cmdline_matches)?);
     let fsck_ctx: std::sync::Arc<FsckCtx> = std::sync::Arc::<FsckCtx>::new(FsckCtx {
         preen: *(cmdline_matches.get_one::<bool>("preen").unwrap()),
         yes: *(cmdline_matches.get_one::<bool>("yes").unwrap()),

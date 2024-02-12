@@ -1,4 +1,3 @@
-#[derive(Debug)]
 pub struct Ctx {
     pub verbose: bool,
     pub dry_run: bool,
@@ -6,6 +5,8 @@ pub struct Ctx {
     tokio_runtime: tokio::runtime::Runtime,
     data_concurrency: u8,
     metadata_concurrency: u8,
+    mime_type_guessers:
+        Vec<Box<dyn crate::mimetypes::MimeTypes + std::marker::Sync + std::marker::Send>>,
 }
 
 struct BoundedParallelismHelperInsideMutex<T> {
@@ -150,6 +151,18 @@ pub fn make_cmdline_parser(argv0: &'static str) -> clap::Command {
                 .default_value("20")
                 .action(clap::ArgAction::Set),
         )
+        .arg(
+            clap::Arg::new("mime_types")
+                .long("mime-types")
+                .value_parser(clap::value_parser!(std::path::PathBuf))
+                .action(clap::ArgAction::Set),
+        )
+        .arg(
+            clap::Arg::new("mime_types_regex")
+                .long("mime-types-regex")
+                .value_parser(clap::value_parser!(std::path::PathBuf))
+                .action(clap::ArgAction::Set),
+        )
 }
 
 static HEX_DIGITS: [char; 16] = [
@@ -165,7 +178,7 @@ pub fn hex_encode(buf: &[u8]) -> String {
 }
 
 impl Ctx {
-    pub fn new(cmdline_matches: &clap::ArgMatches) -> Ctx {
+    pub fn new(cmdline_matches: &clap::ArgMatches) -> Result<Ctx, crate::error::WuffBlobError> {
         let storage_account: &String = cmdline_matches
             .get_one::<String>("storage_account")
             .unwrap();
@@ -183,7 +196,34 @@ impl Ctx {
 
         access_key = String::from(access_key.trim());
 
-        Ctx {
+        let mut mime_type_guessers: Vec<Box<dyn crate::mimetypes::MimeTypes + std::marker::Sync + std::marker::Send>> =  Vec::<Box<dyn crate::mimetypes::MimeTypes + std::marker::Sync + std::marker::Send>>::new();
+        // If the user has passed in their own, add them first so they will be
+        // checked first
+        if let Some(mime_types_filename) =
+            cmdline_matches.get_one::<std::path::PathBuf>("mime_types_regex")
+        {
+            let contents: &'static str =
+                Box::leak(std::fs::read_to_string(mime_types_filename)?.into_boxed_str());
+            mime_type_guessers.push(crate::mimetypes::new(contents, true)?);
+        }
+        if let Some(mime_types_filename) =
+            cmdline_matches.get_one::<std::path::PathBuf>("mime_types")
+        {
+            let contents: &'static str =
+                Box::leak(std::fs::read_to_string(mime_types_filename)?.into_boxed_str());
+            mime_type_guessers.push(crate::mimetypes::new(contents, false)?);
+        }
+        // OK, now put in the standard ones.
+        mime_type_guessers.push(crate::mimetypes::new(
+            crate::mimetypes::DEFAULT_REGEX,
+            true,
+        )?);
+        mime_type_guessers.push(crate::mimetypes::new(
+            crate::mimetypes::DEFAULT_FIXED,
+            false,
+        )?);
+
+        Ok(Ctx {
             verbose: *(cmdline_matches.get_one::<bool>("verbose").unwrap()),
             dry_run: *(cmdline_matches.get_one::<bool>("dry_run").unwrap()),
             azure_client: crate::azure::AzureClient::new(storage_account, &access_key, container),
@@ -195,7 +235,8 @@ impl Ctx {
             metadata_concurrency: *(cmdline_matches
                 .get_one::<u8>("metadata_concurrency")
                 .unwrap()),
-        }
+            mime_type_guessers: mime_type_guessers,
+        })
     }
 
     pub fn run_async_main<F>(&self, f: F) -> Result<(), crate::error::WuffBlobError>
@@ -235,6 +276,13 @@ impl Ctx {
     }
 
     pub fn get_desired_mime_type(&self, path: &crate::wuffpath::WuffPath) -> &'static str {
+        if let Some(basename) = path.components.last() {
+        for mime_type_guesser in &self.mime_type_guessers {
+            if let Some(mime_type) = mime_type_guesser.get_desired_mime_type(basename) {
+                return mime_type;
+            }
+        }
+        }
         "application/octet-stream"
     }
 }
