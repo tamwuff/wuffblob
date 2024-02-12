@@ -197,11 +197,27 @@ impl Ctx {
                 .unwrap()),
         }
     }
+
     pub fn run_async_main<F>(&self, f: F) -> Result<(), crate::error::WuffBlobError>
     where
         F: std::future::Future<Output = Result<(), crate::error::WuffBlobError>>,
     {
         self.tokio_runtime.block_on(f)
+    }
+
+    pub fn install_siginfo_handler<F>(&self, cb: F) -> Result<(), crate::error::WuffBlobError>
+    where
+        F: Fn() + std::marker::Send + 'static,
+    {
+        let sig_num: tokio::signal::unix::SignalKind = tokio::signal::unix::SignalKind::info();
+        let mut signal_waiter: tokio::signal::unix::Signal = tokio::signal::unix::signal(sig_num)?;
+        let _ = self.get_async_spawner().spawn(async move {
+            loop {
+                signal_waiter.recv().await;
+                cb();
+            }
+        });
+        Ok(())
     }
 
     pub fn get_async_spawner(&self) -> &tokio::runtime::Handle {

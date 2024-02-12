@@ -21,9 +21,11 @@
 // In all modes, we will iterate through all blobs and check:
 //   - content type (it should match what we think it should be)
 //   - MD5 (it should have one; if it doesn't, start hashing in the background)
-//   - etag (it should be the same as the hash, in hex format)
 // Additionally, in non-preen mode, we will:
 //   - check the hash even if it had an MD5 already
+//
+// Azure does not let us modify:
+//   - etag
 //
 // We don't consider it our purview to examine or modify:
 //   - content disposition
@@ -109,7 +111,6 @@ impl FsckCtx {
 enum RepairType {
     ContentType,
     Md5,
-    Etag,
 }
 
 #[derive(Debug, Clone)]
@@ -276,15 +277,20 @@ impl FileChecker {
         let mut hasher: md5::Md5 = <md5::Md5 as md5::Digest>::new();
         let expected_len: u64 = self.properties.content_length;
         let mut num_bytes_hashed: u64 = 0u64;
-        while let Some(maybe_chunk) = futures::stream::StreamExt::next(&mut chunks_stream).await {
+        // We desperately do not want to move anything here, because moves
+        // mean copying. We borrow even when it would seem to be in our best
+        // interest to consume...!
+        while let Some(ref mut maybe_chunk) =
+            futures::stream::StreamExt::next(&mut chunks_stream).await
+        {
             match maybe_chunk {
-                Ok(chunk) => {
-                    let mut chunk_stream = chunk.data;
-                    while let Some(maybe_buf) =
-                        futures::stream::StreamExt::next(&mut chunk_stream).await
+                Ok(ref mut chunk) => {
+                    let chunk_stream = &mut chunk.data;
+                    while let Some(ref maybe_buf) =
+                        futures::stream::StreamExt::next(chunk_stream).await
                     {
                         match maybe_buf {
-                            Ok(buf) => {
+                            Ok(ref buf) => {
                                 let buf_len: usize = buf.len();
                                 <md5::Md5 as md5::Digest>::update(&mut hasher, buf);
                                 num_bytes_hashed += buf_len as u64;
@@ -385,16 +391,6 @@ impl FileChecker {
                         .unwrap(),
                     );
                 }
-                RepairType::Etag => {
-                    if let Some(ref empirical_md5) = self.empirical_md5 {
-                        self.properties.etag = wuffblob::ctx::hex_encode(empirical_md5).into();
-                    } else {
-                        self.properties.etag = wuffblob::ctx::hex_encode(
-                            self.properties.content_md5.as_ref().unwrap().as_slice(),
-                        )
-                        .into();
-                    }
-                }
             }
         }
 
@@ -438,27 +434,19 @@ impl FileChecker {
             });
         }
         if let Some(ref empirical_md5) = self.empirical_md5 {
-            if AsRef::<str>::as_ref(&self.properties.etag)
-                != wuffblob::ctx::hex_encode(empirical_md5)
-            {
-                self.possible_repairs.push(ProposedRepair {
-                    repair_type: RepairType::Etag,
-                    problem_statement: "ETag does not match MD5 hash".to_string(),
-                    question: "Update ETag",
-                    action: "ETag updated",
-                });
-            }
             if let Some(ref md5_from_metadata) = self.properties.content_md5 {
-                self.possible_repairs.push(ProposedRepair {
-                    repair_type: RepairType::Md5,
-                    problem_statement: format!(
-                        "Metadata lists MD5 hash as {} but it is actually {}",
-                        wuffblob::ctx::hex_encode(md5_from_metadata.as_slice()),
-                        wuffblob::ctx::hex_encode(empirical_md5)
-                    ),
-                    question: "Update hash",
-                    action: "Hash updated",
-                });
+                if md5_from_metadata.as_slice() != empirical_md5 {
+                    self.possible_repairs.push(ProposedRepair {
+                        repair_type: RepairType::Md5,
+                        problem_statement: format!(
+                            "Metadata lists MD5 hash as {} but it is actually {}",
+                            wuffblob::ctx::hex_encode(md5_from_metadata.as_slice()),
+                            wuffblob::ctx::hex_encode(empirical_md5)
+                        ),
+                        question: "Update hash",
+                        action: "Hash updated",
+                    });
+                }
             } else {
                 self.possible_repairs.push(ProposedRepair {
                     repair_type: RepairType::Md5,
@@ -468,18 +456,6 @@ impl FileChecker {
                     ),
                     question: "Update hash",
                     action: "Hash updated",
-                });
-            }
-        } else {
-            let presumed_md5: &[u8; 16] = self.properties.content_md5.as_ref().unwrap().as_slice();
-            if AsRef::<str>::as_ref(&self.properties.etag)
-                != wuffblob::ctx::hex_encode(presumed_md5)
-            {
-                self.possible_repairs.push(ProposedRepair {
-                    repair_type: RepairType::Etag,
-                    problem_statement: "ETag does not match MD5 hash".to_string(),
-                    question: "Update ETag",
-                    action: "ETag updated",
                 });
             }
         }
@@ -507,7 +483,8 @@ async fn hasher(
             return Err(format!(
                 "State is {:?}, expected FileCheckerState::Hash",
                 &file_checker.state
-            ).into());
+            )
+            .into());
         }
         let ctx_for_task: std::sync::Arc<wuffblob::ctx::Ctx> =
             std::sync::Arc::<wuffblob::ctx::Ctx>::clone(&ctx);
@@ -522,17 +499,17 @@ async fn hasher(
         for maybe_file_checker in conc_mgr.spawn(&ctx, fut).await {
             let file_checker: FileChecker = maybe_file_checker?;
             match &file_checker.state {
+                FileCheckerState::Terminal => {}
                 FileCheckerState::Message(_) | FileCheckerState::UserInteraction(_) => {
-                    ui_writer
-                        .send(Some(file_checker))
-                        .await?;
+                    ui_writer.send(Some(file_checker)).await?;
                 }
 
                 _ => {
                     return Err(format!(
                         "unexpected file checker state {:?} in hasher task",
                         &file_checker.state
-                    ).into());
+                    )
+                    .into());
                 }
             }
         }
@@ -540,17 +517,17 @@ async fn hasher(
     for maybe_file_checker in conc_mgr.drain().await {
         let file_checker: FileChecker = maybe_file_checker?;
         match &file_checker.state {
+            FileCheckerState::Terminal => {}
             FileCheckerState::Message(_) | FileCheckerState::UserInteraction(_) => {
-                ui_writer
-                    .send(Some(file_checker))
-                    .await?;
+                ui_writer.send(Some(file_checker)).await?;
             }
 
             _ => {
                 return Err(format!(
                     "unexpected file checker state {:?} in hasher task",
                     &file_checker.state
-                ).into());
+                )
+                .into());
             }
         }
     }
@@ -596,7 +573,7 @@ fn ui(
                             print!("\n{}? yes\n\n", proposed_repair.question);
                             file_checker.user_input(&ctx, &fsck_ctx, true);
                         } else {
-                            print!("\n{}? [yn]", proposed_repair.question);
+                            print!("\n{}? [yn] ", proposed_repair.question);
                             std::io::Write::flush(&mut std::io::stdout().lock()).expect("stdout");
                             let answer: bool = loop {
                                 let mut s = String::new();
@@ -652,7 +629,8 @@ async fn properties_updater(
             return Err(format!(
                 "State is {:?}, expected FileCheckerState::UpdateProperties",
                 &file_checker.state
-            ).into());
+            )
+            .into());
         }
 
         let ctx_for_task: std::sync::Arc<wuffblob::ctx::Ctx> =
@@ -671,16 +649,15 @@ async fn properties_updater(
                 FileCheckerState::Terminal => {}
 
                 FileCheckerState::Message(msg) => {
-                    ui_writer
-                        .send(Some(file_checker))
-                        .await?;
+                    ui_writer.send(Some(file_checker)).await?;
                 }
 
                 _ => {
                     return Err(format!(
                         "unexpected file checker state {:?} in properties updater task",
                         &file_checker.state
-                    ).into());
+                    )
+                    .into());
                 }
             }
         }
@@ -691,16 +668,15 @@ async fn properties_updater(
             FileCheckerState::Terminal => {}
 
             FileCheckerState::Message(msg) => {
-                ui_writer
-                    .send(Some(file_checker))
-                    .await?;
+                ui_writer.send(Some(file_checker)).await?;
             }
 
             _ => {
                 return Err(format!(
                     "unexpected file checker state {:?} in properties updater task",
                     &file_checker.state
-                ).into());
+                )
+                .into());
             }
         }
     }
@@ -711,6 +687,50 @@ async fn async_main(
     ctx: std::sync::Arc<wuffblob::ctx::Ctx>,
     fsck_ctx: std::sync::Arc<FsckCtx>,
 ) -> Result<(), wuffblob::error::WuffBlobError> {
+    {
+        let fsck_ctx_for_siginfo: std::sync::Arc<FsckCtx> =
+            std::sync::Arc::<FsckCtx>::clone(&fsck_ctx);
+        ctx.install_siginfo_handler(move || {
+            let stats: FsckStats = fsck_ctx_for_siginfo.get_stats();
+            let mut s: String = String::new();
+            s.push_str("\n\n");
+            if stats.done_listing {
+                s.push_str(&format!(
+                    "{} files and {} directories (final count)\n",
+                    stats.files_found, stats.dirs_found
+                ));
+            } else {
+                s.push_str(&format!(
+                    "{} files and {} directories found so far (list not yet complete)\n",
+                    stats.files_found, stats.dirs_found
+                ));
+            }
+            if stats.user_input_required > 0u64 {
+                s.push_str(&format!(
+                    "User input: {} of {}\n",
+                    stats.user_input_complete, stats.user_input_required
+                ));
+            }
+            if stats.hash_required > 0u64 {
+                s.push_str(&format!(
+                    "Hashing: {} of {} ({} of {} bytes)\n",
+                    stats.hash_complete,
+                    stats.hash_required,
+                    stats.hash_bytes_complete,
+                    stats.hash_bytes_required
+                ));
+            }
+            if stats.propupd_required > 0u64 {
+                s.push_str(&format!(
+                    "Repairs: {} of {}\n",
+                    stats.propupd_complete, stats.propupd_required
+                ));
+            }
+            s.push_str("\n");
+            print!("{}", s);
+        })?;
+    }
+
     let (ui_writer, ui_reader) = tokio::sync::mpsc::channel::<Option<FileChecker>>(1000usize);
     let (hasher_writer, hasher_reader) = tokio::sync::mpsc::channel::<FileChecker>(1000usize);
     let (propupd_writer, propupd_reader) = tokio::sync::mpsc::channel::<FileChecker>(1000usize);
@@ -773,15 +793,11 @@ async fn async_main(
                     FileCheckerState::Terminal => {}
 
                     FileCheckerState::Message(_) | FileCheckerState::UserInteraction(_) => {
-                        ui_writer
-                            .send(Some(file_checker))
-                            .await?;
+                        ui_writer.send(Some(file_checker)).await?;
                     }
 
                     FileCheckerState::Hash => {
-                        hasher_writer
-                            .send(file_checker)
-                            .await?;
+                        hasher_writer.send(file_checker).await?;
                     }
 
                     _ => {
@@ -805,7 +821,12 @@ async fn async_main(
 
     ui_thread.await?;
 
-    Ok(())
+    let stats: FsckStats = fsck_ctx.get_stats();
+    if stats.any_not_repaired {
+        Err("Some files were not repaired.".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn main() -> Result<(), wuffblob::error::WuffBlobError> {

@@ -35,6 +35,22 @@ impl From<String> for WuffBlobError {
     }
 }
 
+impl From<&std::io::Error> for WuffBlobError {
+    fn from(err: &std::io::Error) -> WuffBlobError {
+        WuffBlobError {
+            message: format!("{:?}", err),
+        }
+    }
+}
+
+impl From<std::io::Error> for WuffBlobError {
+    fn from(err: std::io::Error) -> WuffBlobError {
+        WuffBlobError {
+            message: format!("{:?}", err),
+        }
+    }
+}
+
 impl From<&azure_core::error::Error> for WuffBlobError {
     fn from(err: &azure_core::error::Error) -> WuffBlobError {
         WuffBlobError {
