@@ -13,6 +13,11 @@ trait MimeTypesPrivate: MimeTypes {
     ) -> Result<(), crate::error::WuffError>;
 }
 
+// "Fixed" is the traditional mime.types from the Apache project, where it's
+// all based on the file "extension".
+//
+// Does not handle things like README, or Makefile.
+
 #[derive(Debug)]
 pub struct MimeTypesFixed {
     data: std::collections::BTreeMap<std::ffi::OsString, &'static str>,
@@ -21,7 +26,7 @@ pub struct MimeTypesFixed {
 impl MimeTypesFixed {
     fn new() -> Self {
         MimeTypesFixed {
-            data: std::collections::BTreeMap::<std::ffi::OsString, &'static str>::new(),
+            data: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -61,6 +66,14 @@ impl MimeTypes for MimeTypesFixed {
     }
 }
 
+// "Regex" hijacks the mime.types file format, and looks superficially
+// similar, but instead of file "extensions", they are regexes.
+//
+// Nobody ships a mime.types file in this format. The file format being the
+// same as the apache mime.types, doesn't do us any good, except that it's
+// easier to remember how to construct one file format, than to remember
+// the unique quirks of two different file formats.
+
 #[derive(Debug)]
 pub struct MimeTypesRegex {
     data: Vec<(regex::Regex, &'static str)>,
@@ -69,7 +82,7 @@ pub struct MimeTypesRegex {
 impl MimeTypesRegex {
     fn new() -> Self {
         MimeTypesRegex {
-            data: Vec::<(regex::Regex, &'static str)>::new(),
+            data: Vec::new(),
         }
     }
 }
@@ -97,6 +110,8 @@ impl MimeTypes for MimeTypesRegex {
         None
     }
 }
+
+// Putting it all together...
 
 pub fn new(
     data: &'static str,

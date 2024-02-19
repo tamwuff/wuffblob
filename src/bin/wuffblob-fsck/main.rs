@@ -416,7 +416,6 @@ impl FileChecker {
                     stats.any_not_repaired = true;
                     stats.propupd_required -= 1;
                 });
-                return;
             }
         }
     }
@@ -440,8 +439,8 @@ impl FileChecker {
                         repair_type: RepairType::Md5,
                         problem_statement: format!(
                             "Metadata lists MD5 hash as {} but it is actually {}",
-                            wuffblob::ctx::hex_encode(md5_from_metadata.as_slice()),
-                            wuffblob::ctx::hex_encode(empirical_md5)
+                            wuffblob::util::hex_encode(md5_from_metadata.as_slice()),
+                            wuffblob::util::hex_encode(empirical_md5)
                         ),
                         question: "Update hash",
                         action: "Hash updated",
@@ -452,7 +451,7 @@ impl FileChecker {
                     repair_type: RepairType::Md5,
                     problem_statement: format!(
                         "Metadata does not list an MD5 hash. Correct hash is {}",
-                        wuffblob::ctx::hex_encode(empirical_md5)
+                        wuffblob::util::hex_encode(empirical_md5)
                     ),
                     question: "Update hash",
                     action: "Hash updated",
@@ -674,7 +673,9 @@ async fn properties_updater(
     Ok(())
 }
 
-fn siginfo(stats: &Stats) {
+fn siginfo_handler( ctx: &std::sync::Arc<Ctx>) {
+            let stats: Stats = ctx.get_stats();
+
     let mut s: String = String::new();
     s.push_str("\n\n");
     if stats.done_listing {
@@ -717,8 +718,7 @@ async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::Wuf
     ctx.base_ctx.install_siginfo_handler({
         let ctx: std::sync::Arc<Ctx> = std::sync::Arc::clone(&ctx);
         move || {
-            let stats: Stats = ctx.get_stats();
-            siginfo(&stats);
+            siginfo_handler(&ctx);
         }
     })?;
 
@@ -798,10 +798,11 @@ async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::Wuf
                     }
 
                     _ => {
-                        panic!(
-                            "unexpected file checker state {:?} in main thread",
-                            &file_checker.state
-                        );
+                return Err(format!(
+                    "unexpected file checker state {:?} in main thread",
+                    &file_checker.state
+                )
+                .into());
                     }
                 }
             }

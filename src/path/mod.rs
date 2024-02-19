@@ -21,7 +21,7 @@ pub struct WuffPath {
 
 impl WuffPath {
     pub fn from_osstr(s: &std::ffi::OsStr) -> WuffPath {
-        let mut components: Vec<std::ffi::OsString> = Vec::<std::ffi::OsString>::new();
+        let mut components: Vec<std::ffi::OsString> = Vec::new();
         components.push(std::ffi::OsString::new());
         let as_slice: &[u8] = s.as_encoded_bytes();
         for i in 0..as_slice.len() {
@@ -109,7 +109,7 @@ impl WuffPath {
     {
         let mut len: usize = self.components.len();
         if len <= 1 {
-            return ();
+            return;
         }
         let mut parent: WuffPath = self.clone();
         while len > 1 {
