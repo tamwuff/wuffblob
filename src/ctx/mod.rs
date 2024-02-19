@@ -8,6 +8,9 @@ pub struct Ctx {
     mime_type_guessers: Vec<Box<dyn crate::mimetypes::MimeTypes + Sync + Send>>,
 }
 
+// Bounded parallelism: keep track of how many (foo's) are running, don't let
+// another one start until one of the existing ones has finished.
+
 struct BoundedParallelismHelperInsideMutex<T> {
     currently_running: u8,
     results: Vec<T>,
@@ -29,18 +32,14 @@ impl<T: Send + 'static> BoundedParallelism<T> {
     pub fn new(parallelism: u8) -> Self {
         Self {
             parallelism: parallelism,
-            helper: std::sync::Arc::<
-                BoundedParallelismHelper<Result<T, crate::error::WuffError>>,
-            >::new(BoundedParallelismHelper::<
+            helper: std::sync::Arc::new(BoundedParallelismHelper::<
                 Result<T, crate::error::WuffError>,
             > {
-                inside_mutex: std::sync::Mutex::<
-                    BoundedParallelismHelperInsideMutex<Result<T, crate::error::WuffError>>,
-                >::new(BoundedParallelismHelperInsideMutex::<
+                inside_mutex: std::sync::Mutex::new(BoundedParallelismHelperInsideMutex::<
                     Result<T, crate::error::WuffError>,
                 > {
                     currently_running: 0u8,
-                    results: Vec::<Result<T, crate::error::WuffError>>::new(),
+                    results: Vec::new(),
                 }),
                 cv: tokio::sync::Notify::new(),
             }),
@@ -55,8 +54,7 @@ impl<T: Send + 'static> BoundedParallelism<T> {
     where
         F: std::future::Future<Output = T> + Send + 'static,
     {
-        let mut results: Vec<Result<T, crate::error::WuffError>> =
-            Vec::<Result<T, crate::error::WuffError>>::new();
+        let mut results: Vec<Result<T, crate::error::WuffError>> = Vec::new();
         loop {
             {
                 let mut inside_mutex = self.helper.inside_mutex.lock().expect("BoundedParallelism");
@@ -65,19 +63,19 @@ impl<T: Send + 'static> BoundedParallelism<T> {
 
                     let task: tokio::task::JoinHandle<T> = ctx.get_async_spawner().spawn(f);
 
-                    let helper_for_watcher = std::sync::Arc::clone(&self.helper);
-                    let fut = async move {
-                        let result = task.await;
-                        let mut inside_for_watcher = helper_for_watcher
-                            .inside_mutex
-                            .lock()
-                            .expect("BoundedParallelism");
-                        inside_for_watcher.currently_running -= 1;
-                        inside_for_watcher.results.push(match result {
-                            Ok(x) => Ok(x),
-                            Err(e) => Err(e.into()),
-                        });
-                        helper_for_watcher.cv.notify_one();
+                    let fut = {
+                        let helper = std::sync::Arc::clone(&self.helper);
+                        async move {
+                            let result = task.await;
+                            let mut inside_for_watcher =
+                                helper.inside_mutex.lock().expect("BoundedParallelism");
+                            inside_for_watcher.currently_running -= 1;
+                            inside_for_watcher.results.push(match result {
+                                Ok(x) => Ok(x),
+                                Err(e) => Err(e.into()),
+                            });
+                            helper.cv.notify_one();
+                        }
                     };
                     let _ = ctx.get_async_spawner().spawn(fut);
 
@@ -91,8 +89,7 @@ impl<T: Send + 'static> BoundedParallelism<T> {
     }
 
     pub async fn drain(&self) -> Vec<Result<T, crate::error::WuffError>> {
-        let mut results: Vec<Result<T, crate::error::WuffError>> =
-            Vec::<Result<T, crate::error::WuffError>>::new();
+        let mut results: Vec<Result<T, crate::error::WuffError>> = Vec::new();
         loop {
             {
                 let mut inside_mutex = self.helper.inside_mutex.lock().expect("BoundedParallelism");
@@ -222,7 +219,7 @@ impl Ctx {
         access_key = String::from(access_key.trim());
 
         let mut mime_type_guessers: Vec<Box<dyn crate::mimetypes::MimeTypes + Sync + Send>> =
-            Vec::<Box<dyn crate::mimetypes::MimeTypes + Sync + Send>>::new();
+            Vec::new();
         // If the user has passed in their own, add them first so they will be
         // checked first
         if let Some(mime_types_filename) =
@@ -289,10 +286,11 @@ impl Ctx {
     }
 
     #[cfg(not(unix))]
-    pub fn install_siginfo_handler<F>(&self, cb: F) -> Result<(), crate::error::WuffError>
+    pub fn install_siginfo_handler<F>(&self, _cb: F) -> Result<(), crate::error::WuffError>
     where
         F: Fn() + Send + 'static,
     {
+        Ok(())
     }
 
     pub fn get_async_spawner(&self) -> &tokio::runtime::Handle {
