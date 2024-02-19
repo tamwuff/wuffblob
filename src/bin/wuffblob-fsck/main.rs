@@ -66,7 +66,7 @@
 //     with reporting any errors) we're done.
 
 #[derive(Debug, Clone)]
-struct FsckStats {
+struct Stats {
     files_found: u64,
     bytes_found: u64,
     dirs_found: u64,
@@ -83,9 +83,9 @@ struct FsckStats {
     propupd_complete: u64,
 }
 
-impl FsckStats {
-    fn new() -> FsckStats {
-        FsckStats {
+impl Stats {
+    fn new() -> Stats {
+        Stats {
             files_found: 0u64,
             bytes_found: 0u64,
             dirs_found: 0u64,
@@ -104,21 +104,21 @@ impl FsckStats {
     }
 }
 
-struct FsckCtx {
+struct Ctx {
     base_ctx: std::sync::Arc<wuffblob::ctx::Ctx>,
     preen: bool,
     yes: bool,
-    stats: std::sync::Mutex<FsckStats>,
+    stats: std::sync::Mutex<Stats>,
 }
 
-impl FsckCtx {
-    fn get_stats(&self) -> FsckStats {
+impl Ctx {
+    fn get_stats(&self) -> Stats {
         self.stats.lock().expect("stats").clone()
     }
 
     fn mutate_stats<F>(&self, cb: F)
     where
-        F: FnOnce(&mut FsckStats),
+        F: FnOnce(&mut Stats),
     {
         cb(&mut self.stats.lock().expect("stats"));
     }
@@ -172,7 +172,7 @@ struct FileChecker {
 
 impl FileChecker {
     fn new(
-        ctx: &std::sync::Arc<FsckCtx>,
+        ctx: &std::sync::Arc<Ctx>,
         path: wuffblob::wuffpath::WuffPath,
         is_dir: bool,
         properties: azure_storage_blobs::blob::BlobProperties,
@@ -189,7 +189,7 @@ impl FileChecker {
         };
         if !checker.path.is_canonical() {
             checker.state = FileCheckerState::Message("path is not in canonical form".to_string());
-            ctx.mutate_stats(|stats: &mut FsckStats| {
+            ctx.mutate_stats(|stats: &mut Stats| {
                 stats.any_not_repaired = true;
             });
         } else if checker.is_dir {
@@ -198,7 +198,7 @@ impl FileChecker {
             checker.desired_content_type = ctx.base_ctx.get_desired_mime_type(&checker.path);
             if checker.properties.content_md5.is_none() || !ctx.preen {
                 checker.state = FileCheckerState::Hash;
-                ctx.mutate_stats(|stats: &mut FsckStats| {
+                ctx.mutate_stats(|stats: &mut Stats| {
                     stats.hash_required += 1u64;
                     stats.hash_bytes_required += checker.properties.content_length;
                 });
@@ -209,13 +209,13 @@ impl FileChecker {
         checker
     }
 
-    fn user_input(&mut self, ctx: &std::sync::Arc<FsckCtx>, answer: bool) {
+    fn user_input(&mut self, ctx: &std::sync::Arc<Ctx>, answer: bool) {
         if let FileCheckerState::UserInteraction(ref possible_repair) = self.state {
             if answer {
                 self.authorized_repairs
                     .push(possible_repair.repair_type.clone());
             } else {
-                ctx.mutate_stats(|stats: &mut FsckStats| {
+                ctx.mutate_stats(|stats: &mut Stats| {
                     stats.any_not_repaired = true;
                 });
             }
@@ -223,13 +223,13 @@ impl FileChecker {
                 self.state = FileCheckerState::UserInteraction(next_possible_repair);
             } else if !self.authorized_repairs.is_empty() {
                 self.state = FileCheckerState::UpdateProperties;
-                ctx.mutate_stats(|stats: &mut FsckStats| {
+                ctx.mutate_stats(|stats: &mut Stats| {
                     stats.user_input_complete += 1u64;
                     stats.propupd_required += 1u64;
                 });
             } else {
                 self.state = FileCheckerState::Terminal;
-                ctx.mutate_stats(|stats: &mut FsckStats| {
+                ctx.mutate_stats(|stats: &mut Stats| {
                     stats.user_input_complete += 1u64;
                 });
             }
@@ -241,8 +241,8 @@ impl FileChecker {
         }
     }
 
-    fn message_printed(&mut self, ctx: &std::sync::Arc<FsckCtx>) {
-        if let FileCheckerState::Message(_) = &self.state {
+    fn message_printed(&mut self) {
+        if let FileCheckerState::Message(_) = self.state {
             self.state = FileCheckerState::Terminal;
         } else {
             panic!(
@@ -252,8 +252,8 @@ impl FileChecker {
         }
     }
 
-    async fn do_hash(&mut self, ctx: &std::sync::Arc<FsckCtx>) {
-        if let FileCheckerState::Hash = &self.state {
+    async fn do_hash(&mut self, ctx: &std::sync::Arc<Ctx>) {
+        if let FileCheckerState::Hash = self.state {
         } else {
             panic!(
                 "State is {:?}, expected FileCheckerState::Hash",
@@ -265,7 +265,7 @@ impl FileChecker {
             self.path.to_osstring().into_string();
         if maybe_filename_as_string.is_err() {
             self.state = FileCheckerState::Message("path is not valid unicode".to_string());
-            ctx.mutate_stats(|stats: &mut FsckStats| {
+            ctx.mutate_stats(|stats: &mut Stats| {
                 stats.any_not_repaired = true;
                 stats.hash_required -= 1u64;
                 stats.hash_bytes_required -= self.properties.content_length;
@@ -298,13 +298,13 @@ impl FileChecker {
                                 let buf_len: usize = buf.len();
                                 <md5::Md5 as md5::Digest>::update(&mut hasher, buf);
                                 num_bytes_hashed += buf_len as u64;
-                                ctx.mutate_stats(|stats: &mut FsckStats| {
+                                ctx.mutate_stats(|stats: &mut Stats| {
                                     stats.hash_bytes_complete += buf_len as u64;
                                 });
                             }
                             Err(err) => {
                                 self.state = FileCheckerState::Message(format!("{:?}", err));
-                                ctx.mutate_stats(|stats: &mut FsckStats| {
+                                ctx.mutate_stats(|stats: &mut Stats| {
                                     stats.any_not_repaired = true;
                                     stats.hash_bytes_complete -= num_bytes_hashed;
                                     stats.hash_required -= 1u64;
@@ -317,7 +317,7 @@ impl FileChecker {
                 }
                 Err(err) => {
                     self.state = FileCheckerState::Message(format!("{:?}", err));
-                    ctx.mutate_stats(|stats: &mut FsckStats| {
+                    ctx.mutate_stats(|stats: &mut Stats| {
                         stats.any_not_repaired = true;
                         stats.hash_bytes_complete -= num_bytes_hashed;
                         stats.hash_required -= 1u64;
@@ -332,7 +332,7 @@ impl FileChecker {
                 "Expected {} bytes, got {} instead",
                 expected_len, num_bytes_hashed
             ));
-            ctx.mutate_stats(|stats: &mut FsckStats| {
+            ctx.mutate_stats(|stats: &mut Stats| {
                 stats.any_not_repaired = true;
                 stats.hash_bytes_complete -= num_bytes_hashed;
                 stats.hash_required -= 1u64;
@@ -346,13 +346,13 @@ impl FileChecker {
                 .try_into()
                 .unwrap(),
         );
-        ctx.mutate_stats(|stats: &mut FsckStats| {
+        ctx.mutate_stats(|stats: &mut Stats| {
             stats.hash_complete += 1;
         });
         self.analyze(ctx);
     }
 
-    async fn do_update_properties(&mut self, ctx: &std::sync::Arc<FsckCtx>) {
+    async fn do_update_properties(&mut self, ctx: &std::sync::Arc<Ctx>) {
         if let FileCheckerState::UpdateProperties = self.state {
         } else {
             panic!(
@@ -367,7 +367,7 @@ impl FileChecker {
             self.path.to_osstring().into_string();
         if maybe_filename_as_string.is_err() {
             self.state = FileCheckerState::Message("path is not valid unicode".to_string());
-            ctx.mutate_stats(|stats: &mut FsckStats| {
+            ctx.mutate_stats(|stats: &mut Stats| {
                 stats.any_not_repaired = true;
                 stats.propupd_required -= 1;
             });
@@ -395,7 +395,7 @@ impl FileChecker {
             }
         }
 
-        ctx.mutate_stats(|stats: &mut FsckStats| {
+        ctx.mutate_stats(|stats: &mut Stats| {
             stats.any_propupd_attempted = true;
         });
         match blob_client
@@ -406,13 +406,13 @@ impl FileChecker {
         {
             Ok(_) => {
                 self.state = FileCheckerState::Terminal;
-                ctx.mutate_stats(|stats: &mut FsckStats| {
+                ctx.mutate_stats(|stats: &mut Stats| {
                     stats.propupd_complete += 1;
                 });
             }
             Err(err) => {
                 self.state = FileCheckerState::Message(format!("{:?}", err));
-                ctx.mutate_stats(|stats: &mut FsckStats| {
+                ctx.mutate_stats(|stats: &mut Stats| {
                     stats.any_not_repaired = true;
                     stats.propupd_required -= 1;
                 });
@@ -421,7 +421,7 @@ impl FileChecker {
         }
     }
 
-    fn analyze(&mut self, ctx: &std::sync::Arc<FsckCtx>) {
+    fn analyze(&mut self, ctx: &std::sync::Arc<Ctx>) {
         if self.properties.content_type != self.desired_content_type {
             self.possible_repairs.push(ProposedRepair {
                 repair_type: RepairType::ContentType,
@@ -461,7 +461,7 @@ impl FileChecker {
         }
         if let Some(possible_repair) = self.possible_repairs.pop() {
             self.state = FileCheckerState::UserInteraction(possible_repair);
-            ctx.mutate_stats(|stats: &mut FsckStats| {
+            ctx.mutate_stats(|stats: &mut Stats| {
                 stats.user_input_required += 1;
             });
         } else {
@@ -471,13 +471,13 @@ impl FileChecker {
 }
 
 async fn hasher(
-    ctx: std::sync::Arc<FsckCtx>,
+    ctx: std::sync::Arc<Ctx>,
     mut hasher_reader: tokio::sync::mpsc::Receiver<Box<FileChecker>>,
     ui_writer: tokio::sync::mpsc::Sender<Option<Box<FileChecker>>>,
 ) -> Result<(), wuffblob::error::WuffBlobError> {
     let conc_mgr = ctx.base_ctx.data_concurrency_mgr::<Box<FileChecker>>();
     while let Some(mut file_checker) = hasher_reader.recv().await {
-        if let FileCheckerState::Hash = &file_checker.state {
+        if let FileCheckerState::Hash = file_checker.state {
         } else {
             return Err(format!(
                 "State is {:?}, expected FileCheckerState::Hash",
@@ -485,14 +485,16 @@ async fn hasher(
             )
             .into());
         }
-        let ctx_for_task: std::sync::Arc<FsckCtx> = std::sync::Arc::<FsckCtx>::clone(&ctx);
-        let fut = async move {
-            file_checker.do_hash(&ctx_for_task).await;
-            file_checker
+        let fut = {
+            let ctx: std::sync::Arc<Ctx> = std::sync::Arc::clone(&ctx);
+            async move {
+                file_checker.do_hash(&ctx).await;
+                file_checker
+            }
         };
         for maybe_file_checker in conc_mgr.spawn(&ctx.base_ctx, fut).await {
             let file_checker: Box<FileChecker> = maybe_file_checker?;
-            match &file_checker.state {
+            match file_checker.state {
                 FileCheckerState::Terminal => {}
                 FileCheckerState::Message(_) | FileCheckerState::UserInteraction(_) => {
                     ui_writer.send(Some(file_checker)).await?;
@@ -510,7 +512,7 @@ async fn hasher(
     }
     for maybe_file_checker in conc_mgr.drain().await {
         let file_checker: Box<FileChecker> = maybe_file_checker?;
-        match &file_checker.state {
+        match file_checker.state {
             FileCheckerState::Terminal => {}
             FileCheckerState::Message(_) | FileCheckerState::UserInteraction(_) => {
                 ui_writer.send(Some(file_checker)).await?;
@@ -534,7 +536,7 @@ async fn hasher(
 // stay running, but after that point all it is expecting to receive is
 // plain Messages.
 fn ui(
-    ctx: std::sync::Arc<FsckCtx>,
+    ctx: std::sync::Arc<Ctx>,
     mut ui_reader: tokio::sync::mpsc::Receiver<Option<Box<FileChecker>>>,
     propupd_writer: tokio::sync::mpsc::Sender<Box<FileChecker>>,
 ) {
@@ -546,15 +548,15 @@ fn ui(
         if let Some(mut file_checker) = maybe_file_checker {
             let name: std::ffi::OsString = file_checker.path.to_osstring();
             loop {
-                match &file_checker.state {
+                match file_checker.state {
                     FileCheckerState::Terminal => {
                         break;
                     }
-                    FileCheckerState::Message(msg) => {
+                    FileCheckerState::Message(ref msg) => {
                         println!("{:?}: {}", name, msg);
-                        file_checker.message_printed(&ctx);
+                        file_checker.message_printed();
                     }
-                    FileCheckerState::UserInteraction(proposed_repair) => {
+                    FileCheckerState::UserInteraction(ref proposed_repair) => {
                         print!("{:?}: {}", name, proposed_repair.problem_statement);
                         if ctx.base_ctx.dry_run {
                             print!("\n{}? no\n\n", proposed_repair.question);
@@ -610,13 +612,13 @@ fn ui(
 }
 
 async fn properties_updater(
-    ctx: std::sync::Arc<FsckCtx>,
+    ctx: std::sync::Arc<Ctx>,
     mut propupd_reader: tokio::sync::mpsc::Receiver<Box<FileChecker>>,
     ui_writer: tokio::sync::mpsc::Sender<Option<Box<FileChecker>>>,
 ) -> Result<(), wuffblob::error::WuffBlobError> {
     let conc_mgr = ctx.base_ctx.metadata_concurrency_mgr::<Box<FileChecker>>();
     while let Some(mut file_checker) = propupd_reader.recv().await {
-        if let FileCheckerState::UpdateProperties = &file_checker.state {
+        if let FileCheckerState::UpdateProperties = file_checker.state {
         } else {
             return Err(format!(
                 "State is {:?}, expected FileCheckerState::UpdateProperties",
@@ -625,17 +627,19 @@ async fn properties_updater(
             .into());
         }
 
-        let ctx_for_task: std::sync::Arc<FsckCtx> = std::sync::Arc::<FsckCtx>::clone(&ctx);
-        let fut = async move {
-            file_checker.do_update_properties(&ctx_for_task).await;
-            file_checker
+        let fut = {
+            let ctx: std::sync::Arc<Ctx> = std::sync::Arc::clone(&ctx);
+            async move {
+                file_checker.do_update_properties(&ctx).await;
+                file_checker
+            }
         };
         for maybe_file_checker in conc_mgr.spawn(&ctx.base_ctx, fut).await {
             let file_checker: Box<FileChecker> = maybe_file_checker?;
-            match &file_checker.state {
+            match file_checker.state {
                 FileCheckerState::Terminal => {}
 
-                FileCheckerState::Message(msg) => {
+                FileCheckerState::Message(_) => {
                     ui_writer.send(Some(file_checker)).await?;
                 }
 
@@ -651,10 +655,10 @@ async fn properties_updater(
     }
     for maybe_file_checker in conc_mgr.drain().await {
         let file_checker: Box<FileChecker> = maybe_file_checker?;
-        match &file_checker.state {
+        match file_checker.state {
             FileCheckerState::Terminal => {}
 
-            FileCheckerState::Message(msg) => {
+            FileCheckerState::Message(_) => {
                 ui_writer.send(Some(file_checker)).await?;
             }
 
@@ -670,71 +674,77 @@ async fn properties_updater(
     Ok(())
 }
 
-async fn async_main(ctx: std::sync::Arc<FsckCtx>) -> Result<(), wuffblob::error::WuffBlobError> {
-    {
-        let ctx_for_siginfo: std::sync::Arc<FsckCtx> = std::sync::Arc::<FsckCtx>::clone(&ctx);
-        ctx.base_ctx.install_siginfo_handler(move || {
-            let stats: FsckStats = ctx_for_siginfo.get_stats();
-            let mut s: String = String::new();
-            s.push_str("\n\n");
-            if stats.done_listing {
-                s.push_str(&format!(
-                    "{} files and {} directories (final count)\n",
-                    stats.files_found, stats.dirs_found
-                ));
-            } else {
-                s.push_str(&format!(
-                    "{} files and {} directories found so far (list not yet complete)\n",
-                    stats.files_found, stats.dirs_found
-                ));
-            }
-            if stats.user_input_required > 0u64 {
-                s.push_str(&format!(
-                    "User input: {} of {}\n",
-                    stats.user_input_complete, stats.user_input_required
-                ));
-            }
-            if stats.hash_required > 0u64 {
-                s.push_str(&format!(
-                    "Hashing: {} of {} ({} of {} bytes)\n",
-                    stats.hash_complete,
-                    stats.hash_required,
-                    stats.hash_bytes_complete,
-                    stats.hash_bytes_required
-                ));
-            }
-            if stats.propupd_required > 0u64 {
-                s.push_str(&format!(
-                    "Repairs: {} of {}\n",
-                    stats.propupd_complete, stats.propupd_required
-                ));
-            }
-            s.push_str("\n");
-            print!("{}", s);
-        })?;
+fn siginfo(stats: &Stats) {
+    let mut s: String = String::new();
+    s.push_str("\n\n");
+    if stats.done_listing {
+        s.push_str(&format!(
+            "{} files and {} directories (final count)\n",
+            stats.files_found, stats.dirs_found
+        ));
+    } else {
+        s.push_str(&format!(
+            "{} files and {} directories found so far (list not yet complete)\n",
+            stats.files_found, stats.dirs_found
+        ));
     }
+    if stats.user_input_required > 0u64 {
+        s.push_str(&format!(
+            "User input: {} of {}\n",
+            stats.user_input_complete, stats.user_input_required
+        ));
+    }
+    if stats.hash_required > 0u64 {
+        s.push_str(&format!(
+            "Hashing: {} of {} ({} of {} bytes)\n",
+            stats.hash_complete,
+            stats.hash_required,
+            stats.hash_bytes_complete,
+            stats.hash_bytes_required
+        ));
+    }
+    if stats.propupd_required > 0u64 {
+        s.push_str(&format!(
+            "Repairs: {} of {}\n",
+            stats.propupd_complete, stats.propupd_required
+        ));
+    }
+    s.push_str("\n");
+    print!("{}", s);
+}
+
+async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::WuffBlobError> {
+    ctx.base_ctx.install_siginfo_handler({
+        let ctx: std::sync::Arc<Ctx> = std::sync::Arc::clone(&ctx);
+        move || {
+            let stats: Stats = ctx.get_stats();
+            siginfo(&stats);
+        }
+    })?;
 
     let (ui_writer, ui_reader) = tokio::sync::mpsc::channel::<Option<Box<FileChecker>>>(1000usize);
     let (hasher_writer, hasher_reader) = tokio::sync::mpsc::channel::<Box<FileChecker>>(1000usize);
     let (propupd_writer, propupd_reader) =
         tokio::sync::mpsc::channel::<Box<FileChecker>>(1000usize);
 
-    let ui_thread: tokio::task::JoinHandle<()> = {
-        let ctx_for_ui: std::sync::Arc<FsckCtx> = std::sync::Arc::<FsckCtx>::clone(&ctx);
-        ctx.base_ctx.get_async_spawner().spawn_blocking(move || {
-            ui(ctx_for_ui, ui_reader, propupd_writer);
-        })
-    };
-    let hasher_task = ctx.base_ctx.get_async_spawner().spawn(hasher(
-        std::sync::Arc::<FsckCtx>::clone(&ctx),
-        hasher_reader,
-        ui_writer.clone(),
-    ));
-    let propupd_task = ctx.base_ctx.get_async_spawner().spawn(properties_updater(
-        std::sync::Arc::<FsckCtx>::clone(&ctx),
-        propupd_reader,
-        ui_writer.clone(),
-    ));
+    let ui_thread: tokio::task::JoinHandle<()> = ctx.base_ctx.get_async_spawner().spawn_blocking({
+        let ctx: std::sync::Arc<Ctx> = std::sync::Arc::clone(&ctx);
+        move || {
+            ui(ctx, ui_reader, propupd_writer);
+        }
+    });
+    let hasher_task: tokio::task::JoinHandle<Result<(), wuffblob::error::WuffBlobError>> =
+        ctx.base_ctx.get_async_spawner().spawn(hasher(
+            std::sync::Arc::clone(&ctx),
+            hasher_reader,
+            ui_writer.clone(),
+        ));
+    let propupd_task: tokio::task::JoinHandle<Result<(), wuffblob::error::WuffBlobError>> =
+        ctx.base_ctx.get_async_spawner().spawn(properties_updater(
+            std::sync::Arc::clone(&ctx),
+            propupd_reader,
+            ui_writer.clone(),
+        ));
 
     let mut contents = ctx
         .base_ctx
@@ -749,7 +759,7 @@ async fn async_main(ctx: std::sync::Arc<FsckCtx>) -> Result<(), wuffblob::error:
         let chunk: azure_storage_blobs::container::operations::list_blobs::ListBlobsResponse =
             possible_chunk?;
         // chunk.blobs.blobs() is a nice convenience function but it only
-        // returns refs...
+        // returns refs... we want to consume...
         for blob_item in chunk.blobs.items {
             if let azure_storage_blobs::container::operations::BlobItem::Blob(blob) = blob_item {
                 let mut is_dir: bool = false;
@@ -759,15 +769,17 @@ async fn async_main(ctx: std::sync::Arc<FsckCtx>) -> Result<(), wuffblob::error:
                     }
                 }
                 if is_dir {
-                    ctx.mutate_stats(|stats: &mut FsckStats| {
+                    ctx.mutate_stats(|stats: &mut Stats| {
                         stats.dirs_found += 1u64;
                     });
                 } else {
-                    ctx.mutate_stats(|stats: &mut FsckStats| {
+                    ctx.mutate_stats(|stats: &mut Stats| {
                         stats.files_found += 1u64;
                         stats.bytes_found += blob.properties.content_length;
                     });
                 }
+                // Here's the big payoff for us having consumed everything:
+                // we get to move blob.properties. Yay!
                 let file_checker: Box<FileChecker> = Box::new(FileChecker::new(
                     &ctx,
                     wuffblob::wuffpath::WuffPath::from_osstr(std::ffi::OsStr::new(&blob.name)),
@@ -795,7 +807,7 @@ async fn async_main(ctx: std::sync::Arc<FsckCtx>) -> Result<(), wuffblob::error:
             }
         }
     }
-    ctx.mutate_stats(|stats: &mut FsckStats| {
+    ctx.mutate_stats(|stats: &mut Stats| {
         stats.done_listing = true;
     });
 
@@ -809,7 +821,7 @@ async fn async_main(ctx: std::sync::Arc<FsckCtx>) -> Result<(), wuffblob::error:
 
     ui_thread.await?;
 
-    let stats: FsckStats = ctx.get_stats();
+    let stats: Stats = ctx.get_stats();
     println!(
         "{} files, {} bytes used",
         stats.files_found, stats.bytes_found
@@ -841,14 +853,12 @@ fn main() -> Result<(), wuffblob::error::WuffBlobError> {
         );
     let cmdline_matches: clap::ArgMatches = cmdline_parser.get_matches();
 
-    let ctx: std::sync::Arc<FsckCtx> = std::sync::Arc::<FsckCtx>::new(FsckCtx {
-        base_ctx: std::sync::Arc::<wuffblob::ctx::Ctx>::new(wuffblob::ctx::Ctx::new(
-            &cmdline_matches,
-        )?),
+    let ctx: std::sync::Arc<Ctx> = std::sync::Arc::new(Ctx {
+        base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new(&cmdline_matches)?),
         preen: *(cmdline_matches.get_one::<bool>("preen").unwrap()),
         yes: *(cmdline_matches.get_one::<bool>("yes").unwrap()),
-        stats: std::sync::Mutex::<FsckStats>::new(FsckStats::new()),
+        stats: std::sync::Mutex::new(Stats::new()),
     });
     ctx.base_ctx
-        .run_async_main(async_main(std::sync::Arc::<FsckCtx>::clone(&ctx)))
+        .run_async_main(async_main(std::sync::Arc::clone(&ctx)))
 }

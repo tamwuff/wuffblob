@@ -1,16 +1,16 @@
 pub static DEFAULT_FIXED: &str = include_str!("mime.types");
 pub static DEFAULT_REGEX: &str = include_str!("mime_overrides.regex");
 
-trait MimeTypesPrivate {
+pub trait MimeTypes {
+    fn get_desired_mime_type(&self, basename: &std::ffi::OsStr) -> Option<&'static str>;
+}
+
+trait MimeTypesPrivate: MimeTypes {
     fn add_mapping(
         &mut self,
         spec: &'static str,
         mime_type: &'static str,
     ) -> Result<(), crate::error::WuffBlobError>;
-}
-
-pub trait MimeTypes: MimeTypesPrivate {
-    fn get_desired_mime_type(&self, basename: &std::ffi::OsStr) -> Option<&'static str>;
 }
 
 #[derive(Debug)]
@@ -41,7 +41,7 @@ impl MimeTypesPrivate for MimeTypesFixed {
 
 impl MimeTypes for MimeTypesFixed {
     fn get_desired_mime_type(&self, basename: &std::ffi::OsStr) -> Option<&'static str> {
-        let mut as_slice: &[u8] = basename.as_encoded_bytes();
+        let as_slice: &[u8] = basename.as_encoded_bytes();
         let mut i: usize = as_slice.len() - 1;
         loop {
             if as_slice[i] == ('.' as u8) {
@@ -101,29 +101,51 @@ impl MimeTypes for MimeTypesRegex {
 pub fn new(
     data: &'static str,
     is_regex: bool,
-) -> Result<Box<dyn MimeTypes + std::marker::Send + std::marker::Sync>, crate::error::WuffBlobError>
-{
-    let r1: regex::Regex = regex::RegexBuilder::new(r"^\s*([^#]\S*)\s+(\S.*?)\s*$")
+) -> Result<Box<dyn MimeTypes + Send + Sync>, crate::error::WuffBlobError> {
+    let r: regex::Regex = regex::RegexBuilder::new(r"^\s*([^#]\S*)\s+(\S.*?)\s*$")
         .multi_line(true)
         .crlf(true)
         .build()
         .expect("regex");
-    let r2: regex::Regex = regex::Regex::new(r"").expect("regex");
-    let mut mime_types: Box<dyn MimeTypes + std::marker::Send + std::marker::Sync> = {
-        if is_regex {
-            Box::new(MimeTypesRegex::new())
-        } else {
-            Box::new(MimeTypesFixed::new())
+
+    // Hmmmm. What I really want to do is to make a Box<dyn MimeTypesPrivate>,
+    // set it to either a MimeTypesRegex or a MimeTypesFixed, and then stop
+    // caring about which one it is. I should be able to fill up my
+    // Box<dyn MimeTypesPrivate> full of stuff no matter what it is
+    // underneath. But then I run into problems when I have to return a
+    // Box<dyn MimeTypes>. Because I don't have a Box<dyn MimeTypes>, and the
+    // thing I do have is a Box<dyn MimeTypesPrivate> and is not convertable
+    // to a Box<dyn MimeTypes>.
+    //
+    // I guess I can copy/paste the code that fills them up... Hnnnngg...
+
+    if is_regex {
+        let mut mime_types: MimeTypesRegex = MimeTypesRegex::new();
+
+        // copied/pasted for loop :-(
+        for m in r.captures_iter(data) {
+            let mime_type: &'static str = m.get(1).unwrap().as_str();
+            let specs: &'static str = m.get(2).unwrap().as_str();
+            for spec in specs.split_whitespace() {
+                mime_types.add_mapping(spec, mime_type)?;
+            }
         }
-    };
-    for m in r1.captures_iter(data) {
-        let mime_type: &'static str = m.get(1).unwrap().as_str();
-        let specs: &'static str = m.get(2).unwrap().as_str();
-        for spec in specs.split_whitespace() {
-            mime_types.add_mapping(spec, mime_type)?;
+
+        Ok(Box::new(mime_types))
+    } else {
+        let mut mime_types: MimeTypesFixed = MimeTypesFixed::new();
+
+        // copied/pasted for loop :-(
+        for m in r.captures_iter(data) {
+            let mime_type: &'static str = m.get(1).unwrap().as_str();
+            let specs: &'static str = m.get(2).unwrap().as_str();
+            for spec in specs.split_whitespace() {
+                mime_types.add_mapping(spec, mime_type)?;
+            }
         }
+
+        Ok(Box::new(mime_types))
     }
-    Ok(mime_types)
 }
 
 #[test]

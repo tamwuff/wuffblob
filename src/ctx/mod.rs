@@ -5,8 +5,7 @@ pub struct Ctx {
     tokio_runtime: tokio::runtime::Runtime,
     data_concurrency: u8,
     metadata_concurrency: u8,
-    mime_type_guessers:
-        Vec<Box<dyn crate::mimetypes::MimeTypes + std::marker::Sync + std::marker::Send>>,
+    mime_type_guessers: Vec<Box<dyn crate::mimetypes::MimeTypes + Sync + Send>>,
 }
 
 struct BoundedParallelismHelperInsideMutex<T> {
@@ -26,7 +25,7 @@ pub struct BoundedParallelism<T> {
     helper: std::sync::Arc<BoundedParallelismHelper<Result<T, crate::error::WuffBlobError>>>,
 }
 
-impl<T: std::marker::Send + 'static> BoundedParallelism<T> {
+impl<T: Send + 'static> BoundedParallelism<T> {
     pub fn new(parallelism: u8) -> Self {
         Self {
             parallelism: parallelism,
@@ -54,7 +53,7 @@ impl<T: std::marker::Send + 'static> BoundedParallelism<T> {
         f: F,
     ) -> Vec<Result<T, crate::error::WuffBlobError>>
     where
-        F: std::future::Future<Output = T> + std::marker::Send + 'static,
+        F: std::future::Future<Output = T> + Send + 'static,
     {
         let mut results: Vec<Result<T, crate::error::WuffBlobError>> =
             Vec::<Result<T, crate::error::WuffBlobError>>::new();
@@ -222,7 +221,8 @@ impl Ctx {
 
         access_key = String::from(access_key.trim());
 
-        let mut mime_type_guessers: Vec<Box<dyn crate::mimetypes::MimeTypes + std::marker::Sync + std::marker::Send>> =  Vec::<Box<dyn crate::mimetypes::MimeTypes + std::marker::Sync + std::marker::Send>>::new();
+        let mut mime_type_guessers: Vec<Box<dyn crate::mimetypes::MimeTypes + Sync + Send>> =
+            Vec::<Box<dyn crate::mimetypes::MimeTypes + Sync + Send>>::new();
         // If the user has passed in their own, add them first so they will be
         // checked first
         if let Some(mime_types_filename) =
@@ -275,7 +275,7 @@ impl Ctx {
     #[cfg(unix)]
     pub fn install_siginfo_handler<F>(&self, cb: F) -> Result<(), crate::error::WuffBlobError>
     where
-        F: Fn() + std::marker::Send + 'static,
+        F: Fn() + Send + 'static,
     {
         let sig_num: tokio::signal::unix::SignalKind = what_is_siginfo_on_this_platform();
         let mut signal_waiter: tokio::signal::unix::Signal = tokio::signal::unix::signal(sig_num)?;
@@ -291,7 +291,7 @@ impl Ctx {
     #[cfg(not(unix))]
     pub fn install_siginfo_handler<F>(&self, cb: F) -> Result<(), crate::error::WuffBlobError>
     where
-        F: Fn() + std::marker::Send + 'static,
+        F: Fn() + Send + 'static,
     {
     }
 
@@ -299,13 +299,11 @@ impl Ctx {
         self.tokio_runtime.handle()
     }
 
-    pub fn data_concurrency_mgr<T: std::marker::Send + 'static>(&self) -> BoundedParallelism<T> {
+    pub fn data_concurrency_mgr<T: Send + 'static>(&self) -> BoundedParallelism<T> {
         return BoundedParallelism::<T>::new(self.data_concurrency);
     }
 
-    pub fn metadata_concurrency_mgr<T: std::marker::Send + 'static>(
-        &self,
-    ) -> BoundedParallelism<T> {
+    pub fn metadata_concurrency_mgr<T: Send + 'static>(&self) -> BoundedParallelism<T> {
         return BoundedParallelism::<T>::new(self.metadata_concurrency);
     }
 
