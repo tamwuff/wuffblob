@@ -120,9 +120,52 @@ impl WuffPath {
     }
 }
 
+impl From<&std::ffi::OsStr> for WuffPath {
+    fn from(s: &std::ffi::OsStr) -> WuffPath {
+        WuffPath::from_osstr(s)
+    }
+}
+
 impl From<&str> for WuffPath {
     fn from(s: &str) -> WuffPath {
         WuffPath::from_osstr(std::ffi::OsStr::new(s))
+    }
+}
+
+impl TryFrom<&std::path::Path> for WuffPath {
+    type Error = crate::error::WuffError;
+
+    fn try_from(path: &std::path::Path) -> Result<WuffPath, crate::error::WuffError> {
+        // Per the docs, Windows has something called a "prefix" and paths can
+        // have prefixes, or roots, or both, or neither.
+        //
+        // I'm fine with letting paths through here if they have roots, because
+        // a root is just "/" and we know how to deal with that.
+        //
+        // If a path has a "prefix" there is no valid WuffPath representation
+        // of it.
+        let mut components: Vec<std::ffi::OsString> = Vec::new();
+        for component in path.components() {
+            components.push(match component {
+                std::path::Component::Prefix(_) => {
+                    return Err(format!("{:?}: prefixes not supported", path).into());
+                }
+                std::path::Component::RootDir => std::ffi::OsString::new(),
+                std::path::Component::CurDir => std::ffi::OsStr::new(".").to_os_string(),
+                std::path::Component::ParentDir => std::ffi::OsStr::new("..").to_os_string(),
+                std::path::Component::Normal(s) => s.to_os_string(),
+            });
+        }
+        Ok(WuffPath {
+            components: components,
+        })
+    }
+}
+
+impl std::fmt::Display for WuffPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        let s: std::ffi::OsString = self.to_osstring();
+        write!(f, "{:?}", s)
     }
 }
 
@@ -319,5 +362,45 @@ fn plenty_of_parents() {
             Into::<std::ffi::OsString>::into(String::from("foo/bar")),
             Into::<std::ffi::OsString>::into(String::from("foo")),
         )
+    );
+}
+
+#[test]
+fn from_path_sensible_nice_ok_happy() {
+    let s: &std::path::Path = std::path::Path::new("foo/bar");
+    let p = TryInto::<WuffPath>::try_into(s);
+    assert!(p.is_ok());
+    let p: WuffPath = p.unwrap();
+    assert_eq!(
+        p.components,
+        vec!(
+            Into::<std::ffi::OsString>::into(String::from("foo")),
+            Into::<std::ffi::OsString>::into(String::from("bar")),
+        )
+    );
+    assert_eq!(
+        p.to_osstring(),
+        Into::<std::ffi::OsString>::into(String::from("foo/bar"))
+    );
+}
+
+#[test]
+fn from_path_gnarly_lots_of_things() {
+    let s: &std::path::Path = std::path::Path::new("/foo/../bar");
+    let p = TryInto::<WuffPath>::try_into(s);
+    assert!(p.is_ok());
+    let p: WuffPath = p.unwrap();
+    assert_eq!(
+        p.components,
+        vec!(
+            std::ffi::OsString::new(),
+            Into::<std::ffi::OsString>::into(String::from("foo")),
+            Into::<std::ffi::OsString>::into(String::from("..")),
+            Into::<std::ffi::OsString>::into(String::from("bar")),
+        )
+    );
+    assert_eq!(
+        p.to_osstring(),
+        Into::<std::ffi::OsString>::into(String::from("/foo/../bar"))
     );
 }

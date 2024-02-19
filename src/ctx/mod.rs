@@ -193,7 +193,9 @@ impl Ctx {
         return crate::util::BoundedParallelism::<T>::new(self.data_concurrency);
     }
 
-    pub fn metadata_concurrency_mgr<T: Send + 'static>(&self) -> crate::util::BoundedParallelism<T> {
+    pub fn metadata_concurrency_mgr<T: Send + 'static>(
+        &self,
+    ) -> crate::util::BoundedParallelism<T> {
         return crate::util::BoundedParallelism::<T>::new(self.metadata_concurrency);
     }
 

@@ -673,8 +673,8 @@ async fn properties_updater(
     Ok(())
 }
 
-fn siginfo_handler( ctx: &std::sync::Arc<Ctx>) {
-            let stats: Stats = ctx.get_stats();
+fn siginfo_handler(ctx: &std::sync::Arc<Ctx>) {
+    let stats: Stats = ctx.get_stats();
 
     let mut s: String = String::new();
     s.push_str("\n\n");
@@ -798,11 +798,11 @@ async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::Wuf
                     }
 
                     _ => {
-                return Err(format!(
-                    "unexpected file checker state {:?} in main thread",
-                    &file_checker.state
-                )
-                .into());
+                        return Err(format!(
+                            "unexpected file checker state {:?} in main thread",
+                            &file_checker.state
+                        )
+                        .into());
                     }
                 }
             }

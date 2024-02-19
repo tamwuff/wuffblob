@@ -81,9 +81,7 @@ pub struct MimeTypesRegex {
 
 impl MimeTypesRegex {
     fn new() -> Self {
-        MimeTypesRegex {
-            data: Vec::new(),
-        }
+        MimeTypesRegex { data: Vec::new() }
     }
 }
 
