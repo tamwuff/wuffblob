@@ -10,7 +10,7 @@ trait MimeTypesPrivate: MimeTypes {
         &mut self,
         spec: &'static str,
         mime_type: &'static str,
-    ) -> Result<(), crate::error::WuffBlobError>;
+    ) -> Result<(), crate::error::WuffError>;
 }
 
 #[derive(Debug)]
@@ -31,7 +31,7 @@ impl MimeTypesPrivate for MimeTypesFixed {
         &mut self,
         spec: &'static str,
         mime_type: &'static str,
-    ) -> Result<(), crate::error::WuffBlobError> {
+    ) -> Result<(), crate::error::WuffError> {
         let mut spec_as_osstring: std::ffi::OsString = std::ffi::OsStr::new(spec).to_os_string();
         spec_as_osstring.make_ascii_lowercase();
         let _ = self.data.insert(spec_as_osstring, mime_type);
@@ -79,7 +79,7 @@ impl MimeTypesPrivate for MimeTypesRegex {
         &mut self,
         spec: &'static str,
         mime_type: &'static str,
-    ) -> Result<(), crate::error::WuffBlobError> {
+    ) -> Result<(), crate::error::WuffError> {
         self.data.push((regex::Regex::new(spec)?, mime_type));
         Ok(())
     }
@@ -101,7 +101,7 @@ impl MimeTypes for MimeTypesRegex {
 pub fn new(
     data: &'static str,
     is_regex: bool,
-) -> Result<Box<dyn MimeTypes + Send + Sync>, crate::error::WuffBlobError> {
+) -> Result<Box<dyn MimeTypes + Send + Sync>, crate::error::WuffError> {
     let r: regex::Regex = regex::RegexBuilder::new(r"^\s*([^#]\S*)\s+(\S.*?)\s*$")
         .multi_line(true)
         .crlf(true)

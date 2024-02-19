@@ -22,7 +22,7 @@ struct BoundedParallelismHelper<T> {
 
 pub struct BoundedParallelism<T> {
     parallelism: u8,
-    helper: std::sync::Arc<BoundedParallelismHelper<Result<T, crate::error::WuffBlobError>>>,
+    helper: std::sync::Arc<BoundedParallelismHelper<Result<T, crate::error::WuffError>>>,
 }
 
 impl<T: Send + 'static> BoundedParallelism<T> {
@@ -30,17 +30,17 @@ impl<T: Send + 'static> BoundedParallelism<T> {
         Self {
             parallelism: parallelism,
             helper: std::sync::Arc::<
-                BoundedParallelismHelper<Result<T, crate::error::WuffBlobError>>,
+                BoundedParallelismHelper<Result<T, crate::error::WuffError>>,
             >::new(BoundedParallelismHelper::<
-                Result<T, crate::error::WuffBlobError>,
+                Result<T, crate::error::WuffError>,
             > {
                 inside_mutex: std::sync::Mutex::<
-                    BoundedParallelismHelperInsideMutex<Result<T, crate::error::WuffBlobError>>,
+                    BoundedParallelismHelperInsideMutex<Result<T, crate::error::WuffError>>,
                 >::new(BoundedParallelismHelperInsideMutex::<
-                    Result<T, crate::error::WuffBlobError>,
+                    Result<T, crate::error::WuffError>,
                 > {
                     currently_running: 0u8,
-                    results: Vec::<Result<T, crate::error::WuffBlobError>>::new(),
+                    results: Vec::<Result<T, crate::error::WuffError>>::new(),
                 }),
                 cv: tokio::sync::Notify::new(),
             }),
@@ -51,12 +51,12 @@ impl<T: Send + 'static> BoundedParallelism<T> {
         &self,
         ctx: &std::sync::Arc<Ctx>,
         f: F,
-    ) -> Vec<Result<T, crate::error::WuffBlobError>>
+    ) -> Vec<Result<T, crate::error::WuffError>>
     where
         F: std::future::Future<Output = T> + Send + 'static,
     {
-        let mut results: Vec<Result<T, crate::error::WuffBlobError>> =
-            Vec::<Result<T, crate::error::WuffBlobError>>::new();
+        let mut results: Vec<Result<T, crate::error::WuffError>> =
+            Vec::<Result<T, crate::error::WuffError>>::new();
         loop {
             {
                 let mut inside_mutex = self.helper.inside_mutex.lock().expect("BoundedParallelism");
@@ -90,9 +90,9 @@ impl<T: Send + 'static> BoundedParallelism<T> {
         results
     }
 
-    pub async fn drain(&self) -> Vec<Result<T, crate::error::WuffBlobError>> {
-        let mut results: Vec<Result<T, crate::error::WuffBlobError>> =
-            Vec::<Result<T, crate::error::WuffBlobError>>::new();
+    pub async fn drain(&self) -> Vec<Result<T, crate::error::WuffError>> {
+        let mut results: Vec<Result<T, crate::error::WuffError>> =
+            Vec::<Result<T, crate::error::WuffError>>::new();
         loop {
             {
                 let mut inside_mutex = self.helper.inside_mutex.lock().expect("BoundedParallelism");
@@ -203,7 +203,7 @@ pub fn hex_encode(buf: &[u8]) -> String {
 }
 
 impl Ctx {
-    pub fn new(cmdline_matches: &clap::ArgMatches) -> Result<Ctx, crate::error::WuffBlobError> {
+    pub fn new(cmdline_matches: &clap::ArgMatches) -> Result<Ctx, crate::error::WuffError> {
         let storage_account: &String = cmdline_matches
             .get_one::<String>("storage_account")
             .unwrap();
@@ -265,15 +265,15 @@ impl Ctx {
         })
     }
 
-    pub fn run_async_main<F>(&self, f: F) -> Result<(), crate::error::WuffBlobError>
+    pub fn run_async_main<F>(&self, f: F) -> Result<(), crate::error::WuffError>
     where
-        F: std::future::Future<Output = Result<(), crate::error::WuffBlobError>>,
+        F: std::future::Future<Output = Result<(), crate::error::WuffError>>,
     {
         self.tokio_runtime.block_on(f)
     }
 
     #[cfg(unix)]
-    pub fn install_siginfo_handler<F>(&self, cb: F) -> Result<(), crate::error::WuffBlobError>
+    pub fn install_siginfo_handler<F>(&self, cb: F) -> Result<(), crate::error::WuffError>
     where
         F: Fn() + Send + 'static,
     {
@@ -289,7 +289,7 @@ impl Ctx {
     }
 
     #[cfg(not(unix))]
-    pub fn install_siginfo_handler<F>(&self, cb: F) -> Result<(), crate::error::WuffBlobError>
+    pub fn install_siginfo_handler<F>(&self, cb: F) -> Result<(), crate::error::WuffError>
     where
         F: Fn() + Send + 'static,
     {
@@ -307,7 +307,7 @@ impl Ctx {
         return BoundedParallelism::<T>::new(self.metadata_concurrency);
     }
 
-    pub fn get_desired_mime_type(&self, path: &crate::wuffpath::WuffPath) -> &'static str {
+    pub fn get_desired_mime_type(&self, path: &crate::path::WuffPath) -> &'static str {
         if let Some(basename) = path.components.last() {
             for mime_type_guesser in &self.mime_type_guessers {
                 if let Some(mime_type) = mime_type_guesser.get_desired_mime_type(basename) {

@@ -160,7 +160,7 @@ enum FileCheckerState {
 
 #[derive(Debug)]
 struct FileChecker {
-    path: wuffblob::wuffpath::WuffPath,
+    path: wuffblob::path::WuffPath,
     desired_content_type: &'static str,
     is_dir: bool,
     properties: azure_storage_blobs::blob::BlobProperties,
@@ -173,7 +173,7 @@ struct FileChecker {
 impl FileChecker {
     fn new(
         ctx: &std::sync::Arc<Ctx>,
-        path: wuffblob::wuffpath::WuffPath,
+        path: wuffblob::path::WuffPath,
         is_dir: bool,
         properties: azure_storage_blobs::blob::BlobProperties,
     ) -> FileChecker {
@@ -474,7 +474,7 @@ async fn hasher(
     ctx: std::sync::Arc<Ctx>,
     mut hasher_reader: tokio::sync::mpsc::Receiver<Box<FileChecker>>,
     ui_writer: tokio::sync::mpsc::Sender<Option<Box<FileChecker>>>,
-) -> Result<(), wuffblob::error::WuffBlobError> {
+) -> Result<(), wuffblob::error::WuffError> {
     let conc_mgr = ctx.base_ctx.data_concurrency_mgr::<Box<FileChecker>>();
     while let Some(mut file_checker) = hasher_reader.recv().await {
         if let FileCheckerState::Hash = file_checker.state {
@@ -615,7 +615,7 @@ async fn properties_updater(
     ctx: std::sync::Arc<Ctx>,
     mut propupd_reader: tokio::sync::mpsc::Receiver<Box<FileChecker>>,
     ui_writer: tokio::sync::mpsc::Sender<Option<Box<FileChecker>>>,
-) -> Result<(), wuffblob::error::WuffBlobError> {
+) -> Result<(), wuffblob::error::WuffError> {
     let conc_mgr = ctx.base_ctx.metadata_concurrency_mgr::<Box<FileChecker>>();
     while let Some(mut file_checker) = propupd_reader.recv().await {
         if let FileCheckerState::UpdateProperties = file_checker.state {
@@ -713,7 +713,7 @@ fn siginfo(stats: &Stats) {
     print!("{}", s);
 }
 
-async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::WuffBlobError> {
+async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::WuffError> {
     ctx.base_ctx.install_siginfo_handler({
         let ctx: std::sync::Arc<Ctx> = std::sync::Arc::clone(&ctx);
         move || {
@@ -733,13 +733,13 @@ async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::Wuf
             ui(ctx, ui_reader, propupd_writer);
         }
     });
-    let hasher_task: tokio::task::JoinHandle<Result<(), wuffblob::error::WuffBlobError>> =
+    let hasher_task: tokio::task::JoinHandle<Result<(), wuffblob::error::WuffError>> =
         ctx.base_ctx.get_async_spawner().spawn(hasher(
             std::sync::Arc::clone(&ctx),
             hasher_reader,
             ui_writer.clone(),
         ));
-    let propupd_task: tokio::task::JoinHandle<Result<(), wuffblob::error::WuffBlobError>> =
+    let propupd_task: tokio::task::JoinHandle<Result<(), wuffblob::error::WuffError>> =
         ctx.base_ctx.get_async_spawner().spawn(properties_updater(
             std::sync::Arc::clone(&ctx),
             propupd_reader,
@@ -782,7 +782,7 @@ async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::Wuf
                 // we get to move blob.properties. Yay!
                 let file_checker: Box<FileChecker> = Box::new(FileChecker::new(
                     &ctx,
-                    wuffblob::wuffpath::WuffPath::from_osstr(std::ffi::OsStr::new(&blob.name)),
+                    wuffblob::path::WuffPath::from_osstr(std::ffi::OsStr::new(&blob.name)),
                     is_dir,
                     blob.properties,
                 ));
@@ -837,7 +837,7 @@ async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::Wuf
     }
 }
 
-fn main() -> Result<(), wuffblob::error::WuffBlobError> {
+fn main() -> Result<(), wuffblob::error::WuffError> {
     let cmdline_parser: clap::Command = wuffblob::ctx::make_cmdline_parser("wuffblob-fsck")
         .arg(
             clap::Arg::new("preen")
