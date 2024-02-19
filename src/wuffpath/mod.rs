@@ -53,17 +53,18 @@ impl WuffPath {
     }
 
     pub fn is_canonical(&self) -> bool {
-        let len: usize = self.components.len();
-
-        // If it's empty or starts or ends with a slash, it's not canonical
-        if (len == 0usize) || self.components[0].is_empty() || self.components[len - 1].is_empty() {
+        // If it's empty, it's not canonical.
+        if self.components.is_empty() {
             return false;
         }
 
         // If any of its components are ".", "..", or contain a NUL byte,
-        // it's not canonical
+        // it's not canonical. If it starts or ends with a slash, or contains
+        // two slashes in a row, it's not canonical.
         for component in &self.components {
-            if (component == std::ffi::OsStr::new(".")) || (component == std::ffi::OsStr::new(".."))
+            if component.is_empty()
+                || (component == std::ffi::OsStr::new("."))
+                || (component == std::ffi::OsStr::new(".."))
             {
                 return false;
             }
@@ -75,6 +76,29 @@ impl WuffPath {
         }
 
         true
+    }
+
+    pub fn canonicalize(&self) -> Option<WuffPath> {
+        // If it's empty or starts with a slash, it's not canonicalizable.
+        if self.components.is_empty() || self.components[0].is_empty() {
+            return None;
+        }
+
+        // Try just removing all the dots, and all the consecutive slashes.
+        // See if that fixes it.
+        let mut cloned: WuffPath = self.clone();
+        cloned
+            .components
+            .retain(|component: &std::ffi::OsString| -> bool {
+                (!component.is_empty()) && (component != std::ffi::OsStr::new("."))
+            });
+
+        // We didn't check for ".." or for NUL bytes. Do that now.
+        if cloned.is_canonical() {
+            Some(cloned)
+        } else {
+            None
+        }
     }
 
     // This method will not work right if we are not in canonical form.
@@ -204,6 +228,12 @@ fn starts_with_slash_is_not_canonical() {
 }
 
 #[test]
+fn two_slashes_is_not_canonical() {
+    let p: WuffPath = "foo//bar".into();
+    assert!(!p.is_canonical());
+}
+
+#[test]
 fn has_dot_is_not_canonical() {
     let p: WuffPath = "foo/./bar".into();
     assert!(!p.is_canonical());
@@ -237,6 +267,31 @@ fn has_null_is_not_canonical() {
 fn canonical_is_canonical() {
     let p: WuffPath = "foo/bar/baz".into();
     assert!(p.is_canonical());
+}
+
+#[test]
+fn canonicalize_absolute_path_should_fail() {
+    let p: WuffPath = "/foo/bar".into();
+    let c = p.canonicalize();
+    assert!(c.is_none());
+}
+
+#[test]
+fn canonicalize_path_with_dotdot_should_fail() {
+    let p: WuffPath = "foo/../bar".into();
+    let c = p.canonicalize();
+    assert!(c.is_none());
+}
+
+#[test]
+fn canonicalize_mildly_funky_path() {
+    let p: WuffPath = "foo//.//bar//".into();
+    let c = p.canonicalize();
+    assert!(c.is_some());
+    assert_eq!(
+        c.unwrap().to_osstring(),
+        Into::<std::ffi::OsString>::into(String::from("foo/bar"))
+    );
 }
 
 #[test]
