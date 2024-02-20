@@ -27,189 +27,16 @@
 // The main thread will collect everyone's panics and all the errors, and
 // it will decide how to present all of it to the user.
 
-#[derive(Debug, Clone)]
-struct Stats {
-    files_found: u64,
-    bytes_found: u64,
-    files_queried_in_cloud: u64,
-    done_listing: bool,
-    done_querying: bool,
-    files_need_hashing_locally: u64,
-    bytes_need_hashing_locally: u64,
-    files_completed_hashing_locally: u64,
-    bytes_completed_hashing_locally: u64,
-    files_can_reuse: u64,
-    bytes_can_reuse: u64,
-    files_need_upload: u64,
-    bytes_need_upload: u64,
-    files_uploaded: u64,
-    bytes_uploaded: u64,
-}
+mod ctx;
+mod state_machine;
 
-impl Stats {
-    fn new() -> Stats {
-        Stats {
-            files_found: 0u64,
-            bytes_found: 0u64,
-            files_queried_in_cloud: 0u64,
-            done_listing: false,
-            done_querying: false,
-            files_need_hashing_locally: 0u64,
-            bytes_need_hashing_locally: 0u64,
-            files_completed_hashing_locally: 0u64,
-            bytes_completed_hashing_locally: 0u64,
-            files_can_reuse: 0u64,
-            bytes_can_reuse: 0u64,
-            files_need_upload: 0u64,
-            bytes_need_upload: 0u64,
-            files_uploaded: 0u64,
-            bytes_uploaded: 0u64,
-        }
-    }
-}
-
-struct Ctx {
-    base_ctx: std::sync::Arc<wuffblob::ctx::Ctx>,
-    to_upload: Vec<(std::path::PathBuf, wuffblob::path::WuffPath)>,
-    force: bool,
-    stats: std::sync::Mutex<Stats>,
-}
-
-impl Ctx {
-    fn get_stats(&self) -> Stats {
-        self.stats.lock().expect("stats").clone()
-    }
-
-    fn mutate_stats<F>(&self, cb: F)
-    where
-        F: FnOnce(&mut Stats),
-    {
-        cb(&mut self.stats.lock().expect("stats"));
-    }
-}
-
-#[derive(Debug, Clone)]
-enum UploaderState {
-    // Success! I don't need to be put into any queue.
-    Ok,
-
-    // Please put me into the error queue.
-    Err(String),
-
-    // Please put me into the metadata queue.
-    NeedGet,
-
-    // Please put me into the metadata queue.
-    NeedMkdir,
-
-    // Please put me into the queue to be hashed.
-    Hash,
-
-    // Please put me into the queue to be uploaded.
-    Upload,
-}
-
-#[derive(Debug)]
-struct Uploader {
-    local_path: std::path::PathBuf,
-    remote_path: wuffblob::path::WuffPath,
-    state: UploaderState,
-    local_metadata: std::fs::Metadata,
-    remote_metadata: Option<azure_storage_blobs::blob::BlobProperties>,
-    desired_content_type: &'static str,
-    local_md5: Option<[u8; 16]>,
-}
-
-impl Uploader {
-    fn new(
-        ctx: &std::sync::Arc<Ctx>,
-        local_path: std::path::PathBuf,
-        remote_path: wuffblob::path::WuffPath,
-        local_metadata: std::fs::Metadata,
-    ) -> Uploader {
-        // They were only supposed to give us canonical paths that were
-        // either files or directories. Just double check...
-        assert!(remote_path.is_canonical());
-        let file_type: std::fs::FileType = local_metadata.file_type();
-        assert!(file_type.is_file() || file_type.is_dir());
-
-        Uploader {
-            local_path: local_path,
-            remote_path: remote_path,
-            state: UploaderState::NeedGet,
-            local_metadata: local_metadata,
-            remote_metadata: None,
-            desired_content_type: "",
-            local_md5: None,
-        }
-    }
-}
-
-fn siginfo_handler(ctx: &std::sync::Arc<Ctx>) {
-    let stats: Stats = ctx.get_stats();
-
-    let mut s: String = String::new();
-    s.push_str("\n\n");
-    if stats.done_querying {
-        assert!(stats.done_listing);
-        assert_eq!(stats.files_found, stats.files_queried_in_cloud);
-        s.push_str(&format!(
-            "{} files and directories (final count)\n",
-            stats.files_found
-        ));
-    } else if stats.done_listing {
-        s.push_str(&format!(
-            "Queried {} out of {} files and directories\n",
-            stats.files_queried_in_cloud, stats.files_found
-        ));
-    } else {
-        s.push_str(&format!(
-            "Queried {} out of {} found so far (list not yet complete)\n",
-            stats.files_queried_in_cloud, stats.files_found
-        ));
-    }
-    if stats.files_need_hashing_locally > 0u64 {
-        s.push_str(&format!(
-            "Hashing: {} of {} ({} of {} bytes)\n",
-            stats.files_completed_hashing_locally,
-            stats.files_need_hashing_locally,
-            stats.bytes_completed_hashing_locally,
-            stats.bytes_need_hashing_locally
-        ));
-    }
-    s.push_str("\n");
-
-    if stats.files_found > 0u64 {
-        s.push_str(&format!(
-            "Can reuse: {} of {} ({} of {} bytes)\n",
-            stats.files_can_reuse, stats.files_found, stats.bytes_can_reuse, stats.bytes_found
-        ));
-        s.push_str(&format!(
-            "Need to upload: {} of {} ({} of {} bytes)\n",
-            stats.files_need_upload, stats.files_found, stats.bytes_need_upload, stats.bytes_found
-        ));
-        s.push_str("\n");
-    }
-
-    if stats.files_need_upload > 0u64 {
-        s.push_str(&format!(
-            "Uploaded: {} of {} ({} of {} bytes)\n",
-            stats.files_uploaded,
-            stats.files_need_upload,
-            stats.bytes_uploaded,
-            stats.bytes_need_upload,
-        ));
-        s.push_str("\n");
-    }
-
-    print!("{}", s);
-}
-
-async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::WuffError> {
+async fn async_main(
+    ctx: std::sync::Arc<crate::ctx::Ctx>,
+) -> Result<(), wuffblob::error::WuffError> {
     ctx.base_ctx.install_siginfo_handler({
-        let ctx: std::sync::Arc<Ctx> = std::sync::Arc::clone(&ctx);
+        let ctx: std::sync::Arc<crate::ctx::Ctx> = std::sync::Arc::clone(&ctx);
         move || {
-            siginfo_handler(&ctx);
+            crate::ctx::siginfo_handler(&ctx);
         }
     })?;
 
@@ -272,12 +99,8 @@ fn main() -> Result<(), wuffblob::error::WuffError> {
         }
     }
 
-    let ctx: std::sync::Arc<Ctx> = std::sync::Arc::new(Ctx {
-        base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new(&cmdline_matches)?),
-        to_upload: to_upload,
-        force: *(cmdline_matches.get_one::<bool>("force").unwrap()),
-        stats: std::sync::Mutex::new(Stats::new()),
-    });
+    let ctx: std::sync::Arc<crate::ctx::Ctx> =
+        std::sync::Arc::new(crate::ctx::Ctx::new(&cmdline_matches, to_upload)?);
     ctx.base_ctx
         .run_async_main(async_main(std::sync::Arc::clone(&ctx)))
 }
