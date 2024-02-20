@@ -54,6 +54,17 @@ impl Ctx {
         })
     }
 
+    // for unit tests
+    #[cfg(test)]
+    pub fn new_minimal() -> Ctx {
+        Ctx {
+            base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new_minimal()),
+            preen: false,
+            yes: false,
+            stats: std::sync::Mutex::new(crate::ctx::Stats::new()),
+        }
+    }
+
     pub fn get_stats(&self) -> Stats {
         self.stats.lock().expect("stats").clone()
     }

@@ -154,6 +154,30 @@ impl Ctx {
         })
     }
 
+    // for unit tests
+    #[allow(dead_code)]
+    pub fn new_minimal() -> Ctx {
+        Ctx {
+            verbose: true,
+            dry_run: false,
+            azure_client: crate::azure::AzureClient::new("", "", ""),
+            // Even if we later change the default to be a multithreaded
+            // runtime, we probably still want the current-thread runtime
+            // here, for unit tests. It looks from the docs like it's safe
+            // to create and drop as many of these as we want, as long as
+            // they're the current-thread kind.
+            tokio_runtime: tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio"),
+            data_concurrency: 1u16,
+            metadata_concurrency: 1u16,
+            mime_type_guessers: vec![
+                crate::mimetypes::new(crate::mimetypes::MINIMAL_FIXED, false).expect("mime types"),
+            ],
+        }
+    }
+
     pub fn run_async_main<F>(&self, f: F) -> Result<(), crate::error::WuffError>
     where
         F: std::future::Future<Output = Result<(), crate::error::WuffError>>,

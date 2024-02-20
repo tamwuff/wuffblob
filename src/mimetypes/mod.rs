@@ -1,6 +1,9 @@
 pub static DEFAULT_FIXED: &str = include_str!("mime.types");
 pub static DEFAULT_REGEX: &str = include_str!("mime_overrides.regex");
 
+// for the benefit of unit tests elsewhere in the library
+pub static MINIMAL_FIXED: &str = "text/plain txt\napplication/pdf pdf\n";
+
 pub trait MimeTypes {
     fn get_desired_mime_type(&self, basename: &std::ffi::OsStr) -> Option<&'static str>;
 }

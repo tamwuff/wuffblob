@@ -108,6 +108,52 @@ pub fn hex_encode(buf: &[u8]) -> String {
     s
 }
 
+// For unit testing we want to be able to make BlobProperties objects to our
+// specifications. This is really painful, since there is no public
+// constructor. The only way I can find to do it is to deserialize a minimal
+// one from JSON, which can then be customized to our needs.
+//
+// The fields given here were reverse engineered by starting with "{}" and
+// every time it barfed because of a missing field, I added only that one
+// field.
+fn minimal_fake_blob_properties() -> azure_storage_blobs::blob::BlobProperties {
+    let s: &str = "{\"Creation-Time\": \"Mon, 01 Jan 1970 00:00:00 GMT\", \"Last-Modified\": \"Mon, 01 Jan 1970 00:00:00 GMT\", \"Etag\": \"\", \"Content-Length\": 0, \"Content-Type\": \"\", \"BlobType\": \"BlockBlob\"}";
+    serde_json::from_str::<azure_storage_blobs::blob::BlobProperties>(s).expect(s)
+}
+
+// for unit tests
+#[allow(dead_code)]
+pub fn fake_blob_properties_file(
+    content_type: &str,
+    content_length: u64,
+    hash: Option<&[u8; 16]>,
+) -> azure_storage_blobs::blob::BlobProperties {
+    let mut blob_properties: azure_storage_blobs::blob::BlobProperties =
+        minimal_fake_blob_properties();
+    blob_properties.content_type = content_type.to_string();
+    blob_properties.resource_type = Some("file".to_string());
+    blob_properties.content_length = content_length;
+    if let Some(buf) = hash {
+        blob_properties.content_md5 = Some(
+            azure_storage::prelude::ConsistencyMD5::decode(base64::Engine::encode(
+                &base64::prelude::BASE64_STANDARD,
+                buf,
+            ))
+            .unwrap(),
+        );
+    }
+    blob_properties
+}
+
+// for unit tests
+#[allow(dead_code)]
+pub fn fake_blob_properties_directory() -> azure_storage_blobs::blob::BlobProperties {
+    let mut blob_properties: azure_storage_blobs::blob::BlobProperties =
+        minimal_fake_blob_properties();
+    blob_properties.resource_type = Some("directory".to_string());
+    blob_properties
+}
+
 #[test]
 fn hex_empty() {
     let v = Vec::<u8>::new();
@@ -120,4 +166,35 @@ fn hex_nonempty() {
     let v = vec![185u8, 74u8, 155u8, 38u8, 162u8];
     let s = hex_encode(&v);
     assert_eq!(s, "b94a9b26a2");
+}
+
+#[test]
+fn make_fake_blob_properties_for_file_no_hash() {
+    let p = fake_blob_properties_file("text/plain", 42, None);
+    assert!(p.resource_type.is_some());
+    assert_eq!(p.resource_type.unwrap(), "file");
+    assert_eq!(p.content_type, "text/plain");
+    assert_eq!(p.content_length, 42);
+    assert!(p.content_md5.is_none());
+}
+
+#[test]
+fn make_fake_blob_properties_for_file_with_hash() {
+    let v: [u8; 16] = [23u8; 16];
+    let p = fake_blob_properties_file("application/pdf", 420, Some(&v));
+    assert!(p.resource_type.is_some());
+    assert_eq!(p.resource_type.unwrap(), "file");
+    assert_eq!(p.content_type, "application/pdf");
+    assert_eq!(p.content_length, 420);
+    assert!(p.content_md5.is_some());
+    assert_eq!(p.content_md5.unwrap().as_slice(), &v);
+}
+
+#[test]
+fn make_fake_blob_properties_for_directory() {
+    let p = fake_blob_properties_directory();
+    assert!(p.resource_type.is_some());
+    assert_eq!(p.resource_type.unwrap(), "directory");
+    assert_eq!(p.content_type, "");
+    assert_eq!(p.content_length, 0);
 }
