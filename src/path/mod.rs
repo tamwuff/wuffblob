@@ -1,6 +1,6 @@
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct WuffPath {
-    pub components: Vec<std::ffi::OsString>,
+    components: Vec<std::ffi::OsString>,
 }
 
 // You should be able to convert losslessly between OsStr and WuffPath. If
@@ -58,9 +58,10 @@ impl WuffPath {
             return false;
         }
 
-        // If any of its components are ".", "..", or contain a NUL byte,
-        // it's not canonical. If it starts or ends with a slash, or contains
-        // two slashes in a row, it's not canonical.
+        // If any of its components are ".", "..", or contain a NUL byte or
+        // a slash (*inside* the component), it's not canonical. If it starts
+        // or ends with a slash, or contains two slashes in a row, it's not
+        // canonical.
         for component in &self.components {
             if component.is_empty()
                 || (component == std::ffi::OsStr::new("."))
@@ -69,7 +70,7 @@ impl WuffPath {
                 return false;
             }
             for byte in component.as_encoded_bytes() {
-                if *byte == 0u8 {
+                if (*byte == 0u8) || (*byte == ('/' as u8)) {
                     return false;
                 }
             }
@@ -93,12 +94,18 @@ impl WuffPath {
                 (!component.is_empty()) && (component != std::ffi::OsStr::new("."))
             });
 
-        // We didn't check for ".." or for NUL bytes. Do that now.
+        // We didn't check for ".." or for NUL or '/' bytes. Do that now.
         if cloned.is_canonical() {
             Some(cloned)
         } else {
             None
         }
+    }
+
+    // This method will not work right if we are not in canonical form.
+    // Please only call this if is_canonical() has returned true!
+    pub fn basename(&self) -> Option<&std::ffi::OsString> {
+        self.components.last()
     }
 
     // This method will not work right if we are not in canonical form.
@@ -303,6 +310,23 @@ fn has_null_is_not_canonical() {
     }
     s.push(std::ffi::OsStr::new("aaaaar/baz"));
     let p = WuffPath::from_osstr(&s);
+    assert!(!p.is_canonical());
+}
+
+// This is simulating the case where on some different OS (say, classic Mac)
+// we might have an embedded slash within *one component* of a filename.
+#[test]
+fn has_slash_is_not_canonical() {
+    let p = WuffPath {
+        components: vec![
+            Into::<std::ffi::OsString>::into(String::from("foo/bar")),
+            Into::<std::ffi::OsString>::into(String::from("baz")),
+        ],
+    };
+    assert_eq!(
+        p.to_osstring(),
+        Into::<std::ffi::OsString>::into(String::from("foo/bar/baz"))
+    );
     assert!(!p.is_canonical());
 }
 

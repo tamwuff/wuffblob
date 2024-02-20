@@ -200,7 +200,7 @@ impl Ctx {
     }
 
     pub fn get_desired_mime_type(&self, path: &crate::path::WuffPath) -> &'static str {
-        if let Some(basename) = path.components.last() {
+        if let Some(basename) = path.basename() {
             for mime_type_guesser in &self.mime_type_guessers {
                 if let Some(mime_type) = mime_type_guesser.get_desired_mime_type(basename) {
                     return mime_type;

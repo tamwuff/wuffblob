@@ -65,418 +65,122 @@
 //   - Once the properties updater task is done (and the UI thread is done
 //     with reporting any errors) we're done.
 
-#[derive(Debug, Clone)]
-struct Stats {
-    files_found: u64,
-    bytes_found: u64,
-    dirs_found: u64,
-    done_listing: bool,
-    any_propupd_attempted: bool,
-    any_not_repaired: bool,
-    user_input_required: u64,
-    user_input_complete: u64,
-    hash_required: u64,
-    hash_complete: u64,
-    hash_bytes_required: u64,
-    hash_bytes_complete: u64,
-    propupd_required: u64,
-    propupd_complete: u64,
-}
+mod ctx;
+mod state_machine;
 
-impl Stats {
-    fn new() -> Stats {
-        Stats {
-            files_found: 0u64,
-            bytes_found: 0u64,
-            dirs_found: 0u64,
-            done_listing: false,
-            any_propupd_attempted: false,
-            any_not_repaired: false,
-            user_input_required: 0u64,
-            user_input_complete: 0u64,
-            hash_required: 0u64,
-            hash_complete: 0u64,
-            hash_bytes_required: 0u64,
-            hash_bytes_complete: 0u64,
-            propupd_required: 0u64,
-            propupd_complete: 0u64,
-        }
-    }
-}
-
-struct Ctx {
-    base_ctx: std::sync::Arc<wuffblob::ctx::Ctx>,
-    preen: bool,
-    yes: bool,
-    stats: std::sync::Mutex<Stats>,
-}
-
-impl Ctx {
-    fn get_stats(&self) -> Stats {
-        self.stats.lock().expect("stats").clone()
+async fn do_hash(
+    ctx: &std::sync::Arc<crate::ctx::Ctx>,
+    file_checker: &mut crate::state_machine::FileChecker,
+) {
+    if let crate::state_machine::FileCheckerState::Hash = file_checker.state {
+    } else {
+        panic!(
+            "State is {:?}, expected FileCheckerState::Hash",
+            &file_checker.state
+        );
     }
 
-    fn mutate_stats<F>(&self, cb: F)
-    where
-        F: FnOnce(&mut Stats),
+    let maybe_filename_as_string: Result<String, std::ffi::OsString> =
+        file_checker.path.to_osstring().into_string();
+    if maybe_filename_as_string.is_err() {
+        file_checker.hash_failed(
+            ctx,
+            &wuffblob::error::WuffError::from("path is not valid unicode"),
+        );
+        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+            stats.hash_required -= 1u64;
+            stats.hash_bytes_required -= file_checker.properties.content_length;
+        });
+        return;
+    }
+    let blob_client = ctx
+        .base_ctx
+        .azure_client
+        .container_client
+        .blob_client(maybe_filename_as_string.unwrap());
+    let mut chunks_stream = blob_client.get().into_stream();
+    let mut hasher: md5::Md5 = <md5::Md5 as md5::Digest>::new();
+    let expected_len: u64 = file_checker.properties.content_length;
+    let mut num_bytes_hashed: u64 = 0u64;
+    // We desperately do not want to move anything here, because moves
+    // mean copying. We borrow even when it would seem to be in our best
+    // interest to consume...!
+    while let Some(ref mut maybe_chunk) = futures::stream::StreamExt::next(&mut chunks_stream).await
     {
-        cb(&mut self.stats.lock().expect("stats"));
-    }
-}
-
-#[derive(Debug, Clone)]
-enum RepairType {
-    ContentType,
-    Md5,
-}
-
-#[derive(Debug, Clone)]
-struct ProposedRepair {
-    repair_type: RepairType,
-    problem_statement: String,
-    question: &'static str,
-    action: &'static str,
-}
-
-#[derive(Debug, Clone)]
-enum FileCheckerState {
-    // I don't need to be put into any queue. Terminal state.
-    Terminal,
-
-    // Please put me into the user-interface queue. I don't need any response
-    // from the user, but I would like a message to be printed.
-    Message(String),
-
-    // Please put me into the user-interface queue. We can fix this, but we
-    // need to keep the user informed and/or ask them whether to go ahead.
-    UserInteraction(ProposedRepair),
-
-    // Please put me into the queue to be hashed.
-    Hash,
-
-    // Please put me into the queue for the final properties update.
-    UpdateProperties,
-}
-
-#[derive(Debug)]
-struct FileChecker {
-    path: wuffblob::path::WuffPath,
-    desired_content_type: &'static str,
-    is_dir: bool,
-    properties: azure_storage_blobs::blob::BlobProperties,
-    state: FileCheckerState,
-    empirical_md5: Option<[u8; 16]>,
-    possible_repairs: Vec<ProposedRepair>,
-    authorized_repairs: Vec<RepairType>,
-}
-
-impl FileChecker {
-    fn new(
-        ctx: &std::sync::Arc<Ctx>,
-        path: wuffblob::path::WuffPath,
-        is_dir: bool,
-        properties: azure_storage_blobs::blob::BlobProperties,
-    ) -> FileChecker {
-        let mut checker: FileChecker = FileChecker {
-            path: path,
-            desired_content_type: "",
-            is_dir: is_dir,
-            properties: properties,
-            state: FileCheckerState::Terminal,
-            empirical_md5: None,
-            possible_repairs: Vec::<ProposedRepair>::new(),
-            authorized_repairs: Vec::<RepairType>::new(),
-        };
-        if !checker.path.is_canonical() {
-            checker.state = FileCheckerState::Message("path is not in canonical form".to_string());
-            ctx.mutate_stats(|stats: &mut Stats| {
-                stats.any_not_repaired = true;
-            });
-        } else if checker.is_dir {
-            // not much else to check!
-        } else {
-            checker.desired_content_type = ctx.base_ctx.get_desired_mime_type(&checker.path);
-            if checker.properties.content_md5.is_none() || !ctx.preen {
-                checker.state = FileCheckerState::Hash;
-                ctx.mutate_stats(|stats: &mut Stats| {
-                    stats.hash_required += 1u64;
-                    stats.hash_bytes_required += checker.properties.content_length;
-                });
-            } else {
-                checker.analyze(ctx);
-            }
-        }
-        checker
-    }
-
-    fn user_input(&mut self, ctx: &std::sync::Arc<Ctx>, answer: bool) {
-        if let FileCheckerState::UserInteraction(ref possible_repair) = self.state {
-            if answer {
-                self.authorized_repairs
-                    .push(possible_repair.repair_type.clone());
-            } else {
-                ctx.mutate_stats(|stats: &mut Stats| {
-                    stats.any_not_repaired = true;
-                });
-            }
-            if let Some(next_possible_repair) = self.possible_repairs.pop() {
-                self.state = FileCheckerState::UserInteraction(next_possible_repair);
-            } else if !self.authorized_repairs.is_empty() {
-                self.state = FileCheckerState::UpdateProperties;
-                ctx.mutate_stats(|stats: &mut Stats| {
-                    stats.user_input_complete += 1u64;
-                    stats.propupd_required += 1u64;
-                });
-            } else {
-                self.state = FileCheckerState::Terminal;
-                ctx.mutate_stats(|stats: &mut Stats| {
-                    stats.user_input_complete += 1u64;
-                });
-            }
-        } else {
-            panic!(
-                "State is {:?}, expected FileCheckerState::UserInteraction",
-                &self.state
-            );
-        }
-    }
-
-    fn message_printed(&mut self) {
-        if let FileCheckerState::Message(_) = self.state {
-            self.state = FileCheckerState::Terminal;
-        } else {
-            panic!(
-                "State is {:?}, expected FileCheckerState::Message",
-                &self.state
-            );
-        }
-    }
-
-    async fn do_hash(&mut self, ctx: &std::sync::Arc<Ctx>) {
-        if let FileCheckerState::Hash = self.state {
-        } else {
-            panic!(
-                "State is {:?}, expected FileCheckerState::Hash",
-                &self.state
-            );
-        }
-
-        let maybe_filename_as_string: Result<String, std::ffi::OsString> =
-            self.path.to_osstring().into_string();
-        if maybe_filename_as_string.is_err() {
-            self.state = FileCheckerState::Message("path is not valid unicode".to_string());
-            ctx.mutate_stats(|stats: &mut Stats| {
-                stats.any_not_repaired = true;
-                stats.hash_required -= 1u64;
-                stats.hash_bytes_required -= self.properties.content_length;
-            });
-            return;
-        }
-        let blob_client = ctx
-            .base_ctx
-            .azure_client
-            .container_client
-            .blob_client(maybe_filename_as_string.unwrap());
-        let mut chunks_stream = blob_client.get().into_stream();
-        let mut hasher: md5::Md5 = <md5::Md5 as md5::Digest>::new();
-        let expected_len: u64 = self.properties.content_length;
-        let mut num_bytes_hashed: u64 = 0u64;
-        // We desperately do not want to move anything here, because moves
-        // mean copying. We borrow even when it would seem to be in our best
-        // interest to consume...!
-        while let Some(ref mut maybe_chunk) =
-            futures::stream::StreamExt::next(&mut chunks_stream).await
-        {
-            match maybe_chunk {
-                Ok(ref mut chunk) => {
-                    let chunk_stream = &mut chunk.data;
-                    while let Some(ref maybe_buf) =
-                        futures::stream::StreamExt::next(chunk_stream).await
-                    {
-                        match maybe_buf {
-                            Ok(ref buf) => {
-                                let buf_len: usize = buf.len();
-                                <md5::Md5 as md5::Digest>::update(&mut hasher, buf);
-                                num_bytes_hashed += buf_len as u64;
-                                ctx.mutate_stats(|stats: &mut Stats| {
-                                    stats.hash_bytes_complete += buf_len as u64;
-                                });
-                            }
-                            Err(err) => {
-                                self.state = FileCheckerState::Message(format!("{:?}", err));
-                                ctx.mutate_stats(|stats: &mut Stats| {
-                                    stats.any_not_repaired = true;
-                                    stats.hash_bytes_complete -= num_bytes_hashed;
-                                    stats.hash_required -= 1u64;
-                                    stats.hash_bytes_required -= expected_len;
-                                });
-                                return;
-                            }
+        match maybe_chunk {
+            Ok(ref mut chunk) => {
+                let chunk_stream = &mut chunk.data;
+                while let Some(ref maybe_buf) = futures::stream::StreamExt::next(chunk_stream).await
+                {
+                    match maybe_buf {
+                        Ok(ref buf) => {
+                            let buf_len: usize = buf.len();
+                            <md5::Md5 as md5::Digest>::update(&mut hasher, buf);
+                            num_bytes_hashed += buf_len as u64;
+                            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                                stats.hash_bytes_complete += buf_len as u64;
+                            });
+                        }
+                        Err(err) => {
+                            file_checker.hash_failed(ctx, &wuffblob::error::WuffError::from(err));
+                            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                                stats.hash_bytes_complete -= num_bytes_hashed;
+                                stats.hash_required -= 1u64;
+                                stats.hash_bytes_required -= expected_len;
+                            });
+                            return;
                         }
                     }
                 }
-                Err(err) => {
-                    self.state = FileCheckerState::Message(format!("{:?}", err));
-                    ctx.mutate_stats(|stats: &mut Stats| {
-                        stats.any_not_repaired = true;
-                        stats.hash_bytes_complete -= num_bytes_hashed;
-                        stats.hash_required -= 1u64;
-                        stats.hash_bytes_required -= expected_len;
-                    });
-                    return;
-                }
+            }
+            Err(ref err) => {
+                file_checker.hash_failed(ctx, &wuffblob::error::WuffError::from(err));
+                ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                    stats.hash_bytes_complete -= num_bytes_hashed;
+                    stats.hash_required -= 1u64;
+                    stats.hash_bytes_required -= expected_len;
+                });
+                return;
             }
         }
-        if num_bytes_hashed != expected_len {
-            self.state = FileCheckerState::Message(format!(
+    }
+    if num_bytes_hashed != expected_len {
+        file_checker.hash_failed(
+            ctx,
+            &wuffblob::error::WuffError::from(format!(
                 "Expected {} bytes, got {} instead",
                 expected_len, num_bytes_hashed
-            ));
-            ctx.mutate_stats(|stats: &mut Stats| {
-                stats.any_not_repaired = true;
-                stats.hash_bytes_complete -= num_bytes_hashed;
-                stats.hash_required -= 1u64;
-                stats.hash_bytes_required -= expected_len;
-            });
-            return;
-        }
-        self.empirical_md5 = Some(
-            <md5::Md5 as md5::Digest>::finalize(hasher)
-                .as_slice()
-                .try_into()
-                .unwrap(),
+            )),
         );
-        ctx.mutate_stats(|stats: &mut Stats| {
-            stats.hash_complete += 1;
+        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+            stats.hash_bytes_complete -= num_bytes_hashed;
+            stats.hash_required -= 1u64;
+            stats.hash_bytes_required -= expected_len;
         });
-        self.analyze(ctx);
+        return;
     }
-
-    async fn do_update_properties(&mut self, ctx: &std::sync::Arc<Ctx>) {
-        if let FileCheckerState::UpdateProperties = self.state {
-        } else {
-            panic!(
-                "State is {:?}, expected FileCheckerState::UpdateProperties",
-                &self.state
-            );
-        }
-        if self.authorized_repairs.is_empty() {
-            panic!("do_update_properties(): no repairs authorized");
-        }
-        let maybe_filename_as_string: Result<String, std::ffi::OsString> =
-            self.path.to_osstring().into_string();
-        if maybe_filename_as_string.is_err() {
-            self.state = FileCheckerState::Message("path is not valid unicode".to_string());
-            ctx.mutate_stats(|stats: &mut Stats| {
-                stats.any_not_repaired = true;
-                stats.propupd_required -= 1;
-            });
-            return;
-        }
-        let blob_client = ctx
-            .base_ctx
-            .azure_client
-            .container_client
-            .blob_client(maybe_filename_as_string.unwrap());
-        for repair_type in &self.authorized_repairs {
-            match repair_type {
-                RepairType::ContentType => {
-                    self.properties.content_type = self.desired_content_type.to_string();
-                }
-                RepairType::Md5 => {
-                    self.properties.content_md5 = Some(
-                        azure_storage::prelude::ConsistencyMD5::decode(base64::Engine::encode(
-                            &base64::prelude::BASE64_STANDARD,
-                            self.empirical_md5.as_ref().unwrap(),
-                        ))
-                        .unwrap(),
-                    );
-                }
-            }
-        }
-
-        ctx.mutate_stats(|stats: &mut Stats| {
-            stats.any_propupd_attempted = true;
-        });
-        match blob_client
-            .set_properties()
-            .set_from_blob_properties(self.properties.clone())
-            .into_future()
-            .await
-        {
-            Ok(_) => {
-                self.state = FileCheckerState::Terminal;
-                ctx.mutate_stats(|stats: &mut Stats| {
-                    stats.propupd_complete += 1;
-                });
-            }
-            Err(err) => {
-                self.state = FileCheckerState::Message(format!("{:?}", err));
-                ctx.mutate_stats(|stats: &mut Stats| {
-                    stats.any_not_repaired = true;
-                    stats.propupd_required -= 1;
-                });
-            }
-        }
-    }
-
-    fn analyze(&mut self, ctx: &std::sync::Arc<Ctx>) {
-        if self.properties.content_type != self.desired_content_type {
-            self.possible_repairs.push(ProposedRepair {
-                repair_type: RepairType::ContentType,
-                problem_statement: format!(
-                    "Content type is {} but it should be {}",
-                    self.properties.content_type, self.desired_content_type
-                ),
-                question: "Adjust",
-                action: "Adjusted",
-            });
-        }
-        if let Some(ref empirical_md5) = self.empirical_md5 {
-            if let Some(ref md5_from_metadata) = self.properties.content_md5 {
-                if md5_from_metadata.as_slice() != empirical_md5 {
-                    self.possible_repairs.push(ProposedRepair {
-                        repair_type: RepairType::Md5,
-                        problem_statement: format!(
-                            "Metadata lists MD5 hash as {} but it is actually {}",
-                            wuffblob::util::hex_encode(md5_from_metadata.as_slice()),
-                            wuffblob::util::hex_encode(empirical_md5)
-                        ),
-                        question: "Update hash",
-                        action: "Hash updated",
-                    });
-                }
-            } else {
-                self.possible_repairs.push(ProposedRepair {
-                    repair_type: RepairType::Md5,
-                    problem_statement: format!(
-                        "Metadata does not list an MD5 hash. Correct hash is {}",
-                        wuffblob::util::hex_encode(empirical_md5)
-                    ),
-                    question: "Update hash",
-                    action: "Hash updated",
-                });
-            }
-        }
-        if let Some(possible_repair) = self.possible_repairs.pop() {
-            self.state = FileCheckerState::UserInteraction(possible_repair);
-            ctx.mutate_stats(|stats: &mut Stats| {
-                stats.user_input_required += 1;
-            });
-        } else {
-            self.state = FileCheckerState::Terminal;
-        }
-    }
+    file_checker.provide_hash(
+        ctx,
+        <md5::Md5 as md5::Digest>::finalize(hasher)
+            .as_slice()
+            .try_into()
+            .unwrap(),
+    );
+    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+        stats.hash_complete += 1;
+    });
 }
 
 async fn hasher(
-    ctx: std::sync::Arc<Ctx>,
-    mut hasher_reader: tokio::sync::mpsc::Receiver<Box<FileChecker>>,
-    ui_writer: tokio::sync::mpsc::Sender<Option<Box<FileChecker>>>,
+    ctx: std::sync::Arc<crate::ctx::Ctx>,
+    mut hasher_reader: tokio::sync::mpsc::Receiver<Box<crate::state_machine::FileChecker>>,
+    ui_writer: tokio::sync::mpsc::Sender<Option<Box<crate::state_machine::FileChecker>>>,
 ) -> Result<(), wuffblob::error::WuffError> {
-    let conc_mgr = ctx.base_ctx.data_concurrency_mgr::<Box<FileChecker>>();
+    let conc_mgr = ctx
+        .base_ctx
+        .data_concurrency_mgr::<Box<crate::state_machine::FileChecker>>();
     while let Some(mut file_checker) = hasher_reader.recv().await {
-        if let FileCheckerState::Hash = file_checker.state {
+        if let crate::state_machine::FileCheckerState::Hash = file_checker.state {
         } else {
             return Err(format!(
                 "State is {:?}, expected FileCheckerState::Hash",
@@ -485,17 +189,18 @@ async fn hasher(
             .into());
         }
         let fut = {
-            let ctx: std::sync::Arc<Ctx> = std::sync::Arc::clone(&ctx);
+            let ctx: std::sync::Arc<crate::ctx::Ctx> = std::sync::Arc::clone(&ctx);
             async move {
-                file_checker.do_hash(&ctx).await;
+                do_hash(&ctx, file_checker.as_mut()).await;
                 file_checker
             }
         };
         for maybe_file_checker in conc_mgr.spawn(&ctx.base_ctx, fut).await {
-            let file_checker: Box<FileChecker> = maybe_file_checker?;
+            let file_checker: Box<crate::state_machine::FileChecker> = maybe_file_checker?;
             match file_checker.state {
-                FileCheckerState::Terminal => {}
-                FileCheckerState::Message(_) | FileCheckerState::UserInteraction(_) => {
+                crate::state_machine::FileCheckerState::Terminal => {}
+                crate::state_machine::FileCheckerState::Message(_)
+                | crate::state_machine::FileCheckerState::UserInteraction(_) => {
                     ui_writer.send(Some(file_checker)).await?;
                 }
 
@@ -510,10 +215,11 @@ async fn hasher(
         }
     }
     for maybe_file_checker in conc_mgr.drain().await {
-        let file_checker: Box<FileChecker> = maybe_file_checker?;
+        let file_checker: Box<crate::state_machine::FileChecker> = maybe_file_checker?;
         match file_checker.state {
-            FileCheckerState::Terminal => {}
-            FileCheckerState::Message(_) | FileCheckerState::UserInteraction(_) => {
+            crate::state_machine::FileCheckerState::Terminal => {}
+            crate::state_machine::FileCheckerState::Message(_)
+            | crate::state_machine::FileCheckerState::UserInteraction(_) => {
                 ui_writer.send(Some(file_checker)).await?;
             }
 
@@ -535,37 +241,40 @@ async fn hasher(
 // stay running, but after that point all it is expecting to receive is
 // plain Messages.
 fn ui(
-    ctx: std::sync::Arc<Ctx>,
-    mut ui_reader: tokio::sync::mpsc::Receiver<Option<Box<FileChecker>>>,
-    propupd_writer: tokio::sync::mpsc::Sender<Box<FileChecker>>,
+    ctx: std::sync::Arc<crate::ctx::Ctx>,
+    mut ui_reader: tokio::sync::mpsc::Receiver<Option<Box<crate::state_machine::FileChecker>>>,
+    propupd_writer: tokio::sync::mpsc::Sender<Box<crate::state_machine::FileChecker>>,
 ) {
     // Turn our properties-update writer into an Option so that we can drop
     // it when we need to
-    let mut maybe_propupd_writer: Option<tokio::sync::mpsc::Sender<Box<FileChecker>>> =
-        Some(propupd_writer);
+    let mut maybe_propupd_writer: Option<
+        tokio::sync::mpsc::Sender<Box<crate::state_machine::FileChecker>>,
+    > = Some(propupd_writer);
     while let Some(maybe_file_checker) = ui_reader.blocking_recv() {
         if let Some(mut file_checker) = maybe_file_checker {
             let name: std::ffi::OsString = file_checker.path.to_osstring();
             loop {
                 match file_checker.state {
-                    FileCheckerState::Terminal => {
+                    crate::state_machine::FileCheckerState::Terminal => {
                         break;
                     }
-                    FileCheckerState::Message(ref msg) => {
+                    crate::state_machine::FileCheckerState::Message(ref msg) => {
                         println!("{:?}: {}", name, msg);
                         file_checker.message_printed();
                     }
-                    FileCheckerState::UserInteraction(ref proposed_repair) => {
+                    crate::state_machine::FileCheckerState::UserInteraction(
+                        ref proposed_repair,
+                    ) => {
                         print!("{:?}: {}", name, proposed_repair.problem_statement);
                         if ctx.base_ctx.dry_run {
                             print!("\n{}? no\n\n", proposed_repair.question);
-                            file_checker.user_input(&ctx, false);
+                            file_checker.provide_user_input(&ctx, false);
                         } else if ctx.preen {
                             println!(" ({})", proposed_repair.action);
-                            file_checker.user_input(&ctx, true);
+                            file_checker.provide_user_input(&ctx, true);
                         } else if ctx.yes {
                             print!("\n{}? yes\n\n", proposed_repair.question);
-                            file_checker.user_input(&ctx, true);
+                            file_checker.provide_user_input(&ctx, true);
                         } else {
                             print!("\n{}? [yn] ", proposed_repair.question);
                             std::io::Write::flush(&mut std::io::stdout().lock()).expect("stdout");
@@ -585,10 +294,10 @@ fn ui(
                                     return;
                                 }
                             };
-                            file_checker.user_input(&ctx, answer);
+                            file_checker.provide_user_input(&ctx, answer);
                         }
                     }
-                    FileCheckerState::UpdateProperties => {
+                    crate::state_machine::FileCheckerState::UpdateProperties => {
                         maybe_propupd_writer
                             .as_ref()
                             .unwrap()
@@ -610,14 +319,69 @@ fn ui(
     }
 }
 
+async fn do_update_properties(
+    ctx: &std::sync::Arc<crate::ctx::Ctx>,
+    file_checker: &mut crate::state_machine::FileChecker,
+) {
+    if let crate::state_machine::FileCheckerState::UpdateProperties = file_checker.state {
+    } else {
+        panic!(
+            "State is {:?}, expected FileCheckerState::UpdateProperties",
+            &file_checker.state
+        );
+    }
+    assert!(file_checker.properties_dirty);
+    let maybe_filename_as_string: Result<String, std::ffi::OsString> =
+        file_checker.path.to_osstring().into_string();
+    if maybe_filename_as_string.is_err() {
+        file_checker.update_properties_failed(
+            ctx,
+            &wuffblob::error::WuffError::from("path is not valid unicode"),
+        );
+        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+            stats.propupd_required -= 1;
+        });
+        return;
+    }
+    let blob_client = ctx
+        .base_ctx
+        .azure_client
+        .container_client
+        .blob_client(maybe_filename_as_string.unwrap());
+    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+        stats.any_propupd_attempted = true;
+    });
+    match blob_client
+        .set_properties()
+        .set_from_blob_properties(file_checker.properties.clone())
+        .into_future()
+        .await
+    {
+        Ok(_) => {
+            file_checker.properties_updated();
+            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                stats.propupd_complete += 1;
+            });
+        }
+        Err(err) => {
+            file_checker.update_properties_failed(ctx, &wuffblob::error::WuffError::from(err));
+            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                stats.propupd_required -= 1;
+            });
+        }
+    }
+}
+
 async fn properties_updater(
-    ctx: std::sync::Arc<Ctx>,
-    mut propupd_reader: tokio::sync::mpsc::Receiver<Box<FileChecker>>,
-    ui_writer: tokio::sync::mpsc::Sender<Option<Box<FileChecker>>>,
+    ctx: std::sync::Arc<crate::ctx::Ctx>,
+    mut propupd_reader: tokio::sync::mpsc::Receiver<Box<crate::state_machine::FileChecker>>,
+    ui_writer: tokio::sync::mpsc::Sender<Option<Box<crate::state_machine::FileChecker>>>,
 ) -> Result<(), wuffblob::error::WuffError> {
-    let conc_mgr = ctx.base_ctx.metadata_concurrency_mgr::<Box<FileChecker>>();
+    let conc_mgr = ctx
+        .base_ctx
+        .metadata_concurrency_mgr::<Box<crate::state_machine::FileChecker>>();
     while let Some(mut file_checker) = propupd_reader.recv().await {
-        if let FileCheckerState::UpdateProperties = file_checker.state {
+        if let crate::state_machine::FileCheckerState::UpdateProperties = file_checker.state {
         } else {
             return Err(format!(
                 "State is {:?}, expected FileCheckerState::UpdateProperties",
@@ -627,18 +391,18 @@ async fn properties_updater(
         }
 
         let fut = {
-            let ctx: std::sync::Arc<Ctx> = std::sync::Arc::clone(&ctx);
+            let ctx: std::sync::Arc<crate::ctx::Ctx> = std::sync::Arc::clone(&ctx);
             async move {
-                file_checker.do_update_properties(&ctx).await;
+                do_update_properties(&ctx, file_checker.as_mut()).await;
                 file_checker
             }
         };
         for maybe_file_checker in conc_mgr.spawn(&ctx.base_ctx, fut).await {
-            let file_checker: Box<FileChecker> = maybe_file_checker?;
+            let file_checker: Box<crate::state_machine::FileChecker> = maybe_file_checker?;
             match file_checker.state {
-                FileCheckerState::Terminal => {}
+                crate::state_machine::FileCheckerState::Terminal => {}
 
-                FileCheckerState::Message(_) => {
+                crate::state_machine::FileCheckerState::Message(_) => {
                     ui_writer.send(Some(file_checker)).await?;
                 }
 
@@ -653,11 +417,11 @@ async fn properties_updater(
         }
     }
     for maybe_file_checker in conc_mgr.drain().await {
-        let file_checker: Box<FileChecker> = maybe_file_checker?;
+        let file_checker: Box<crate::state_machine::FileChecker> = maybe_file_checker?;
         match file_checker.state {
-            FileCheckerState::Terminal => {}
+            crate::state_machine::FileCheckerState::Terminal => {}
 
-            FileCheckerState::Message(_) => {
+            crate::state_machine::FileCheckerState::Message(_) => {
                 ui_writer.send(Some(file_checker)).await?;
             }
 
@@ -673,62 +437,25 @@ async fn properties_updater(
     Ok(())
 }
 
-fn siginfo_handler(ctx: &std::sync::Arc<Ctx>) {
-    let stats: Stats = ctx.get_stats();
-
-    let mut s: String = String::new();
-    s.push_str("\n\n");
-    if stats.done_listing {
-        s.push_str(&format!(
-            "{} files and {} directories (final count)\n",
-            stats.files_found, stats.dirs_found
-        ));
-    } else {
-        s.push_str(&format!(
-            "{} files and {} directories found so far (list not yet complete)\n",
-            stats.files_found, stats.dirs_found
-        ));
-    }
-    if stats.user_input_required > 0u64 {
-        s.push_str(&format!(
-            "User input: {} of {}\n",
-            stats.user_input_complete, stats.user_input_required
-        ));
-    }
-    if stats.hash_required > 0u64 {
-        s.push_str(&format!(
-            "Hashing: {} of {} ({} of {} bytes)\n",
-            stats.hash_complete,
-            stats.hash_required,
-            stats.hash_bytes_complete,
-            stats.hash_bytes_required
-        ));
-    }
-    if stats.propupd_required > 0u64 {
-        s.push_str(&format!(
-            "Repairs: {} of {}\n",
-            stats.propupd_complete, stats.propupd_required
-        ));
-    }
-    s.push_str("\n");
-    print!("{}", s);
-}
-
-async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::WuffError> {
+async fn async_main(
+    ctx: std::sync::Arc<crate::ctx::Ctx>,
+) -> Result<(), wuffblob::error::WuffError> {
     ctx.base_ctx.install_siginfo_handler({
-        let ctx: std::sync::Arc<Ctx> = std::sync::Arc::clone(&ctx);
+        let ctx: std::sync::Arc<crate::ctx::Ctx> = std::sync::Arc::clone(&ctx);
         move || {
-            siginfo_handler(&ctx);
+            crate::ctx::siginfo_handler(&ctx);
         }
     })?;
 
-    let (ui_writer, ui_reader) = tokio::sync::mpsc::channel::<Option<Box<FileChecker>>>(1000usize);
-    let (hasher_writer, hasher_reader) = tokio::sync::mpsc::channel::<Box<FileChecker>>(1000usize);
+    let (ui_writer, ui_reader) =
+        tokio::sync::mpsc::channel::<Option<Box<crate::state_machine::FileChecker>>>(1000usize);
+    let (hasher_writer, hasher_reader) =
+        tokio::sync::mpsc::channel::<Box<crate::state_machine::FileChecker>>(1000usize);
     let (propupd_writer, propupd_reader) =
-        tokio::sync::mpsc::channel::<Box<FileChecker>>(1000usize);
+        tokio::sync::mpsc::channel::<Box<crate::state_machine::FileChecker>>(1000usize);
 
     let ui_thread: tokio::task::JoinHandle<()> = ctx.base_ctx.get_async_spawner().spawn_blocking({
-        let ctx: std::sync::Arc<Ctx> = std::sync::Arc::clone(&ctx);
+        let ctx: std::sync::Arc<crate::ctx::Ctx> = std::sync::Arc::clone(&ctx);
         move || {
             ui(ctx, ui_reader, propupd_writer);
         }
@@ -758,6 +485,7 @@ async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::Wuf
         // over. Here we are equally careful *to* consume it.
         let chunk: azure_storage_blobs::container::operations::list_blobs::ListBlobsResponse =
             possible_chunk?;
+
         // chunk.blobs.blobs() is a nice convenience function but it only
         // returns refs... we want to consume...
         for blob_item in chunk.blobs.items {
@@ -769,31 +497,35 @@ async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::Wuf
                     }
                 }
                 if is_dir {
-                    ctx.mutate_stats(|stats: &mut Stats| {
+                    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
                         stats.dirs_found += 1u64;
                     });
                 } else {
-                    ctx.mutate_stats(|stats: &mut Stats| {
+                    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
                         stats.files_found += 1u64;
                         stats.bytes_found += blob.properties.content_length;
                     });
                 }
+
                 // Here's the big payoff for us having consumed everything:
                 // we get to move blob.properties. Yay!
-                let file_checker: Box<FileChecker> = Box::new(FileChecker::new(
-                    &ctx,
-                    wuffblob::path::WuffPath::from_osstr(std::ffi::OsStr::new(&blob.name)),
-                    is_dir,
-                    blob.properties,
-                ));
-                match file_checker.state {
-                    FileCheckerState::Terminal => {}
+                let file_checker: Box<crate::state_machine::FileChecker> =
+                    Box::new(crate::state_machine::FileChecker::new(
+                        &ctx,
+                        wuffblob::path::WuffPath::from_osstr(std::ffi::OsStr::new(&blob.name)),
+                        is_dir,
+                        blob.properties,
+                    ));
 
-                    FileCheckerState::Message(_) | FileCheckerState::UserInteraction(_) => {
+                match file_checker.state {
+                    crate::state_machine::FileCheckerState::Terminal => {}
+
+                    crate::state_machine::FileCheckerState::Message(_)
+                    | crate::state_machine::FileCheckerState::UserInteraction(_) => {
                         ui_writer.send(Some(file_checker)).await?;
                     }
 
-                    FileCheckerState::Hash => {
+                    crate::state_machine::FileCheckerState::Hash => {
                         hasher_writer.send(file_checker).await?;
                     }
 
@@ -808,7 +540,7 @@ async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::Wuf
             }
         }
     }
-    ctx.mutate_stats(|stats: &mut Stats| {
+    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
         stats.done_listing = true;
     });
 
@@ -822,7 +554,7 @@ async fn async_main(ctx: std::sync::Arc<Ctx>) -> Result<(), wuffblob::error::Wuf
 
     ui_thread.await?;
 
-    let stats: Stats = ctx.get_stats();
+    let stats: crate::ctx::Stats = ctx.get_stats();
     println!(
         "{} files, {} bytes used",
         stats.files_found, stats.bytes_found
@@ -854,12 +586,8 @@ fn main() -> Result<(), wuffblob::error::WuffError> {
         );
     let cmdline_matches: clap::ArgMatches = cmdline_parser.get_matches();
 
-    let ctx: std::sync::Arc<Ctx> = std::sync::Arc::new(Ctx {
-        base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new(&cmdline_matches)?),
-        preen: *(cmdline_matches.get_one::<bool>("preen").unwrap()),
-        yes: *(cmdline_matches.get_one::<bool>("yes").unwrap()),
-        stats: std::sync::Mutex::new(Stats::new()),
-    });
+    let ctx: std::sync::Arc<crate::ctx::Ctx> =
+        std::sync::Arc::new(crate::ctx::Ctx::new(&cmdline_matches)?);
     ctx.base_ctx
         .run_async_main(async_main(std::sync::Arc::clone(&ctx)))
 }
