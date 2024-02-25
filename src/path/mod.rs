@@ -3,14 +3,20 @@ pub struct WuffPath {
     components: Vec<std::ffi::OsString>,
 }
 
-// You should be able to convert losslessly between OsStr and WuffPath. If
-// converting from an OsStr to a WuffPath and then back to an OsStr ever gives
-// you back a different OsStr than the one you started with, it is a bug!!
+// If you have an OsStr, you should be able to convert it losslessly to a
+// WuffPath and back. If converting from an OsStr to a WuffPath and then back
+// to an OsStr ever gives you back a different OsStr than the one you started
+// with, it is a bug!!
 //
 // That does not, however, mean that all WuffPaths are equally, shall we say,
 // "kosher". It just means that if you have an OsStr that is treif, you can
 // convert it to a WuffPath that is treif, and you can convert it back to the
 // same treif OsStr.
+//
+// Also, the same does not hold if you have a WuffPath. Converting it to an
+// OsStr and then back to a WuffPath may in fact give you a different WuffPath
+// than the one you started with. This is because WuffPaths allow a special
+// "componentless" value which is not representable as an OsStr.
 //
 // There are also plenty of validation and canonicalization routines in here,
 // too.
@@ -38,6 +44,16 @@ impl WuffPath {
         }
     }
 
+    pub fn new() -> WuffPath {
+        WuffPath {
+            components: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, s: &std::ffi::OsStr) {
+        self.components.push(s.into());
+    }
+
     pub fn to_osstring(&self) -> std::ffi::OsString {
         let mut s: std::ffi::OsString = std::ffi::OsString::new();
         let mut first: bool = true;
@@ -52,9 +68,13 @@ impl WuffPath {
         s
     }
 
+    pub fn is_componentless(&self) -> bool {
+        self.components.is_empty()
+    }
+
     pub fn is_canonical(&self) -> bool {
-        // If it's empty, it's not canonical.
-        if self.components.is_empty() {
+        // If it's componentless, it's not canonical.
+        if self.is_componentless() {
             return false;
         }
 
@@ -79,27 +99,48 @@ impl WuffPath {
         true
     }
 
-    pub fn canonicalize(&self) -> Option<WuffPath> {
-        // If it's empty or starts with a slash, it's not canonicalizable.
-        if self.components.is_empty() || self.components[0].is_empty() {
+    // Componentless paths aren't canonical, but that doesn't make them
+    // worthless. If you take a componentless path and you stick a path
+    // component onto the end, you get a canonical path. So that means that a
+    // componentless path is really a canonical path in potentia. It is just
+    // in need of a component.
+    pub fn canonicalize_or_componentless(mut self) -> Option<WuffPath> {
+        // If it's componentless, well, then, it's componentless.
+        if self.is_componentless() {
+            return Some(self);
+        }
+
+        // If it starts with a slash, it's not canonicalizable.
+        if (self.components.len() > 1) && self.components[0].is_empty() {
             return None;
         }
 
         // Try just removing all the dots, and all the consecutive slashes.
         // See if that fixes it.
-        let mut cloned: WuffPath = self.clone();
-        cloned
-            .components
+        self.components
             .retain(|component: &std::ffi::OsString| -> bool {
                 (!component.is_empty()) && (component != std::ffi::OsStr::new("."))
             });
 
         // We didn't check for ".." or for NUL or '/' bytes. Do that now.
-        if cloned.is_canonical() {
-            Some(cloned)
+        if self.is_componentless() || self.is_canonical() {
+            Some(self)
         } else {
             None
         }
+    }
+
+    pub fn canonicalize(self) -> Option<WuffPath> {
+        let canonicalized_or_componentless: Option<WuffPath> = self.canonicalize_or_componentless();
+        match canonicalized_or_componentless {
+            Some(ref canonicalized) => {
+                if canonicalized.is_componentless() {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+        canonicalized_or_componentless
     }
 
     // This method will not work right if we are not in canonical form.
@@ -110,20 +151,56 @@ impl WuffPath {
 
     // This method will not work right if we are not in canonical form.
     // Please only call this if is_canonical() has returned true!
+    //
+    // This method considers the componentless path to be the ultimate parent
+    // of everything. Sometimes it is useful to consider the componentless
+    // path; sometimes it isn't useful. It's up to you whether you pay
+    // attention to it or not, as it goes past.
     pub fn all_parents<F>(&self, mut cb: F)
     where
         F: FnMut(&WuffPath),
     {
         let mut len: usize = self.components.len();
-        if len <= 1 {
+        if len == 0 {
             return;
         }
         let mut parent: WuffPath = self.clone();
-        while len > 1 {
+        while len > 0 {
             len -= 1;
             parent.components.truncate(len);
             cb(&parent);
         }
+    }
+
+    // Please only use this if you have checked that everything is either
+    // canonical or componentless!
+    pub fn check_for_overlap<'a, T>(paths: T) -> Result<(), crate::error::WuffError>
+    where
+        T: IntoIterator<Item = &'a WuffPath>,
+    {
+        let mut as_set: std::collections::BTreeSet<&'a WuffPath> =
+            std::collections::BTreeSet::new();
+        for path in paths {
+            // caller should have ensured this
+            assert!(path.is_componentless() || path.is_canonical());
+
+            if !as_set.insert(path) {
+                return Err(format!("duplicate path {}", path).into());
+            }
+        }
+        for path in &as_set {
+            let mut conflict: Option<&'a WuffPath> = None;
+            let mut cb = |parent: &WuffPath| {
+                if let Some(wp) = as_set.get(parent) {
+                    conflict = Some(wp);
+                }
+            };
+            path.all_parents(&mut cb);
+            if let Some(wp) = conflict {
+                return Err(format!("paths {} and {} overlap", wp, path).into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -362,31 +439,70 @@ fn canonicalize_mildly_funky_path() {
 }
 
 #[test]
-fn single_has_no_parents() {
-    let mut v = Vec::<std::ffi::OsString>::new();
+fn slash_is_not_canonicalizable_even_if_we_allow_componentless() {
+    let p: WuffPath = "/".into();
+    let c = p.canonicalize_or_componentless();
+    assert!(c.is_none());
+}
+
+#[test]
+fn empty_is_not_canonicalizable_unless_we_allow_componentless() {
+    let p: WuffPath = "".into();
+    let c = p.canonicalize();
+    assert!(c.is_none());
+}
+
+#[test]
+fn empty_is_canonicalizable_if_we_allow_componentless() {
+    let p: WuffPath = "".into();
+    let c = p.canonicalize_or_componentless();
+    assert!(c.is_some());
+    assert!(c.unwrap().is_componentless());
+}
+
+#[test]
+fn componentless_can_be_canonicalized_to_componentless() {
+    let p = WuffPath::new();
+    let c = p.canonicalize_or_componentless();
+    assert!(c.is_some());
+    assert!(c.unwrap().is_componentless());
+}
+
+#[test]
+fn dots_and_slashes_can_be_canonicalized_to_componentless() {
+    let p: WuffPath = ".//.//.//".into();
+    let c = p.canonicalize_or_componentless();
+    assert!(c.is_some());
+    assert!(c.unwrap().is_componentless());
+}
+
+#[test]
+fn dots_starting_with_slash_cannot_be_canonicalized() {
+    let p: WuffPath = "/.//.//.//".into();
+    let c = p.canonicalize_or_componentless();
+    assert!(c.is_none());
+}
+
+#[test]
+fn componentless_has_no_parents() {
+    let mut v = Vec::<WuffPath>::new();
     let cb = |wp: &WuffPath| {
-        v.push(wp.to_osstring());
+        v.push(wp.clone());
     };
-    let p: WuffPath = "foo".into();
+    let p = WuffPath::new();
     p.all_parents(cb);
     assert!(v.is_empty());
 }
 
 #[test]
 fn plenty_of_parents() {
-    let mut v = Vec::<std::ffi::OsString>::new();
+    let mut v = Vec::<WuffPath>::new();
     let cb = |wp: &WuffPath| {
-        v.push(wp.to_osstring());
+        v.push(wp.clone());
     };
     let p: WuffPath = "foo/bar/baz".into();
     p.all_parents(cb);
-    assert_eq!(
-        v,
-        vec!(
-            Into::<std::ffi::OsString>::into(String::from("foo/bar")),
-            Into::<std::ffi::OsString>::into(String::from("foo")),
-        )
-    );
+    assert_eq!(v, vec!("foo/bar".into(), "foo".into(), WuffPath::new()));
 }
 
 #[test]
@@ -427,4 +543,55 @@ fn from_path_gnarly_lots_of_things() {
         p.to_osstring(),
         Into::<std::ffi::OsString>::into(String::from("/foo/../bar"))
     );
+}
+
+#[test]
+fn empty_vec_has_no_overlap() {
+    let v: Vec<WuffPath> = Vec::new();
+    let result = WuffPath::check_for_overlap(&v);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn non_overlapping_vec_has_no_overlap() {
+    let v: Vec<WuffPath> = vec!["foo/bar".into(), "foo/baz".into()];
+    let result = WuffPath::check_for_overlap(&v);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn duplicates_are_overlap() {
+    let v: Vec<WuffPath> = vec!["foo/bar".into(), "foo/bar".into()];
+    let result = WuffPath::check_for_overlap(&v);
+    assert!(result.is_err());
+}
+
+#[test]
+fn parent_child_is_overlap() {
+    let v: Vec<WuffPath> = vec!["foo/bar".into(), "foo/bar/baz/woof".into()];
+    let result = WuffPath::check_for_overlap(&v);
+    assert!(result.is_err());
+}
+
+// try the other order...
+#[test]
+fn child_parent_is_overlap() {
+    let v: Vec<WuffPath> = vec!["foo/bar/baz/woof".into(), "foo/bar".into()];
+    let result = WuffPath::check_for_overlap(&v);
+    assert!(result.is_err());
+}
+
+#[test]
+fn componentless_with_anything_else_is_overlap() {
+    let v: Vec<WuffPath> = vec![WuffPath::new(), "foo/bar/baz/woof".into()];
+    let result = WuffPath::check_for_overlap(&v);
+    assert!(result.is_err());
+}
+
+// and the other order...
+#[test]
+fn anything_with_componentless_is_overlap() {
+    let v: Vec<WuffPath> = vec!["foo/bar/baz/woof".into(), WuffPath::new()];
+    let result = WuffPath::check_for_overlap(&v);
+    assert!(result.is_err());
 }

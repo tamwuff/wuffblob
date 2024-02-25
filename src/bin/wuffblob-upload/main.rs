@@ -50,7 +50,6 @@ fn main() -> Result<(), wuffblob::error::WuffError> {
         .arg(
             clap::Arg::new("paths")
                 .value_parser(clap::value_parser!(std::path::PathBuf))
-                .required(true)
                 .action(clap::ArgAction::Append),
         )
         .arg(
@@ -67,19 +66,23 @@ fn main() -> Result<(), wuffblob::error::WuffError> {
         );
     let cmdline_matches: clap::ArgMatches = cmdline_parser.get_matches();
 
-    let raw_to_upload: Vec<&std::path::PathBuf> = Vec::from_iter(
-        cmdline_matches
-            .get_many::<std::path::PathBuf>("paths")
-            .unwrap(),
-    );
+    let raw_to_upload: Vec<&std::path::PathBuf> =
+        if let Some(paths) = cmdline_matches.get_many::<std::path::PathBuf>("paths") {
+            Vec::from_iter(paths)
+        } else {
+            Vec::new()
+        };
     let mut to_upload: Vec<(std::path::PathBuf, wuffblob::path::WuffPath)> =
         Vec::with_capacity(raw_to_upload.len());
     if let Some(raw_upload_as) = cmdline_matches.get_one::<wuffblob::path::WuffPath>("upload_as") {
-        if raw_to_upload.len() != 1 {
-            return Err("If upload-as is specified, there must be exactly one local path specified to upload".into());
-        }
-        if let Some(upload_as) = raw_upload_as.canonicalize() {
-            to_upload.push((raw_to_upload[0].clone(), upload_as));
+        if let Some(upload_as) = raw_upload_as.clone().canonicalize_or_componentless() {
+            if raw_to_upload.is_empty() {
+                to_upload.push((".".into(), upload_as));
+            } else if raw_to_upload.len() == 1 {
+                to_upload.push((raw_to_upload[0].clone(), upload_as));
+            } else {
+                return Err("If upload-as is specified, there must be at most one local path specified to upload".into());
+            }
         } else {
             return Err(format!(
                 "Upload-as path given as {} which is not canonicalizable",
@@ -87,16 +90,25 @@ fn main() -> Result<(), wuffblob::error::WuffError> {
             )
             .into());
         }
+    } else if raw_to_upload.is_empty() {
+        to_upload.push((".".into(), wuffblob::path::WuffPath::new()));
     } else {
         for path in raw_to_upload {
-            if let Some(upload_as) =
-                TryInto::<wuffblob::path::WuffPath>::try_into(path.as_path())?.canonicalize()
+            if let Some(upload_as) = TryInto::<wuffblob::path::WuffPath>::try_into(path.as_path())?
+                .canonicalize_or_componentless()
             {
                 to_upload.push((path.clone(), upload_as));
             } else {
                 return Err(format!("{:?} is not canonicalizable (try --upload-as)", path).into());
             }
         }
+
+        // make sure there's no overlap
+        let mut paths: Vec<&wuffblob::path::WuffPath> = Vec::with_capacity(to_upload.len());
+        for (_, path) in &to_upload {
+            paths.push(path);
+        }
+        wuffblob::path::WuffPath::check_for_overlap(paths)?;
     }
 
     let ctx: std::sync::Arc<crate::ctx::Ctx> =

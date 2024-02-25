@@ -47,7 +47,10 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    pub fn new(cmdline_matches: &clap::ArgMatches, to_upload: Vec<(std::path::PathBuf, wuffblob::path::WuffPath)>) -> Result<Ctx, wuffblob::error::WuffError> {
+    pub fn new(
+        cmdline_matches: &clap::ArgMatches,
+        to_upload: Vec<(std::path::PathBuf, wuffblob::path::WuffPath)>,
+    ) -> Result<Ctx, wuffblob::error::WuffError> {
         Ok(Ctx {
             base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new(&cmdline_matches)?),
             to_upload: to_upload,
@@ -61,7 +64,7 @@ impl Ctx {
     pub fn new_minimal(from_path: &std::path::Path, to_path: &wuffblob::path::WuffPath) -> Ctx {
         Ctx {
             base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new_minimal()),
-            to_upload: vec!((from_path.to_path_buf(), to_path.clone())),
+            to_upload: vec![(from_path.to_path_buf(), to_path.clone())],
             force: false,
             stats: std::sync::Mutex::new(crate::ctx::Stats::new()),
         }
