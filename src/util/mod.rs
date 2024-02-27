@@ -108,6 +108,45 @@ pub fn hex_encode(buf: &[u8]) -> String {
     s
 }
 
+// for unit tests
+#[allow(dead_code)]
+pub fn fake_local_metadata(desired_size: Option<usize>) -> std::fs::Metadata
+{
+    let mut rng: rand::rngs::ThreadRng = rand::thread_rng();
+    let mut uuid_buf: [u8; 16] = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rng, &mut uuid_buf);
+    let uuid_str: String = hex_encode(&uuid_buf);
+
+    let metadata: std::fs::Metadata;
+
+    let mut dir_name: std::path::PathBuf = std::env::temp_dir();
+    dir_name.push(&uuid_str);
+    let dir_name_for_panic: String = format!("{:?}", &dir_name);
+    std::fs::create_dir(&dir_name).expect(&dir_name_for_panic);
+
+    if let Some(nbytes) = desired_size {
+        let mut file_name: std::path::PathBuf = dir_name.clone();
+        file_name.push(&uuid_str);
+        let file_name_for_panic: String = format!("{:?}", &file_name);
+        let f: std::fs::File = std::fs::File::create(&file_name).expect(&file_name_for_panic);
+        f.set_len(nbytes as u64).expect(&format!("{:?}", &file_name));
+        drop(f);
+
+        metadata = std::fs::metadata(&file_name).expect(&file_name_for_panic);
+        assert!(metadata.file_type().is_file());
+        assert!(metadata.len() == (nbytes as u64));
+
+        std::fs::remove_file(&file_name).expect(&file_name_for_panic);
+    } else {
+        metadata = std::fs::metadata(&dir_name).expect(&dir_name_for_panic);
+        assert!(metadata.file_type().is_dir());
+    }
+
+    std::fs::remove_dir(&dir_name).expect(&dir_name_for_panic);
+
+    metadata
+}
+
 // For unit testing we want to be able to make BlobProperties objects to our
 // specifications. This is really painful, since there is no public
 // constructor. The only way I can find to do it is to deserialize a minimal

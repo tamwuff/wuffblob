@@ -61,10 +61,10 @@ impl Ctx {
 
     // for unit tests
     #[cfg(test)]
-    pub fn new_minimal(from_path: &std::path::Path, to_path: &wuffblob::path::WuffPath) -> Ctx {
+    pub fn new_minimal(from_path: &str, to_path: &str) -> Ctx {
         Ctx {
             base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new_minimal()),
-            to_upload: vec![(from_path.to_path_buf(), to_path.clone())],
+            to_upload: vec![(from_path.into(), to_path.into())],
             force: false,
             stats: std::sync::Mutex::new(crate::ctx::Stats::new()),
         }
