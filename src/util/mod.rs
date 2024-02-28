@@ -108,10 +108,12 @@ pub fn hex_encode(buf: &[u8]) -> String {
     s
 }
 
-// for unit tests
+// For unit testing we want to be able to make Metadata objects to our
+// specifications. This is really painful, since there is no public
+// constructor. The only way I can find to do it is to actually create
+// real temporary files/directories...!
 #[allow(dead_code)]
-pub fn fake_local_metadata(desired_size: Option<usize>) -> std::fs::Metadata
-{
+pub fn fake_local_metadata(desired_size: Option<usize>) -> std::fs::Metadata {
     let mut rng: rand::rngs::ThreadRng = rand::thread_rng();
     let mut uuid_buf: [u8; 16] = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rng, &mut uuid_buf);
@@ -129,7 +131,7 @@ pub fn fake_local_metadata(desired_size: Option<usize>) -> std::fs::Metadata
         file_name.push(&uuid_str);
         let file_name_for_panic: String = format!("{:?}", &file_name);
         let f: std::fs::File = std::fs::File::create(&file_name).expect(&file_name_for_panic);
-        f.set_len(nbytes as u64).expect(&format!("{:?}", &file_name));
+        f.set_len(nbytes as u64).expect(&file_name_for_panic);
         drop(f);
 
         metadata = std::fs::metadata(&file_name).expect(&file_name_for_panic);

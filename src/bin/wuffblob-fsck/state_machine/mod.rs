@@ -158,11 +158,7 @@ impl FileChecker {
         });
     }
 
-    pub fn provide_hash(
-        &mut self,
-        ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        empirical_md5: &[u8; 16],
-    ) {
+    pub fn provide_hash(&mut self, ctx: &std::sync::Arc<crate::ctx::Ctx>, empirical_md5: [u8; 16]) {
         if let FileCheckerState::Hash = self.state {
         } else {
             panic!(
@@ -171,7 +167,7 @@ impl FileChecker {
             );
         }
 
-        self.empirical_md5 = Some(*empirical_md5); // array is Copy
+        self.empirical_md5 = Some(empirical_md5);
         self.analyze(ctx);
     }
 
@@ -407,7 +403,7 @@ fn nonpreen_file_with_correct_hash_goes_to_good() {
     );
 
     // We hashed it, surprise, it was the correct hash all along!
-    file_checker.provide_hash(&ctx, &hash);
+    file_checker.provide_hash(&ctx, hash);
 
     // It should be good to go.
     assert!(
@@ -469,7 +465,7 @@ fn file_with_crazy_everything_goes_and_gets_itself_fixed() {
         &file_checker.state
     );
 
-    file_checker.provide_hash(&ctx, &correct_hash);
+    file_checker.provide_hash(&ctx, correct_hash);
 
     // Actually the order shouldn't matter. But we happen to know that the
     // first repair it will propose, will be the hash.
@@ -540,7 +536,7 @@ fn file_that_doesnt_really_actually_want_to_get_fully_fixed() {
         &file_checker.state
     );
 
-    file_checker.provide_hash(&ctx, &correct_hash);
+    file_checker.provide_hash(&ctx, correct_hash);
 
     // Actually the order shouldn't matter. But we happen to know that the
     // first repair it will propose, will be the hash.
@@ -629,7 +625,7 @@ fn file_that_seriously_is_not_ok_with_being_fixed_goes_straight_to_terminal() {
         &file_checker.state
     );
 
-    file_checker.provide_hash(&ctx, &correct_hash);
+    file_checker.provide_hash(&ctx, correct_hash);
 
     assert!(
         matches!(
