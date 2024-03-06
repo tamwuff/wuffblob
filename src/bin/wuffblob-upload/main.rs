@@ -19,7 +19,9 @@
 //     Azure before it starts the upload, if that is needed. Yes that is a
 //     metadata operation, yes it would be slightly more efficient to let
 //     the metadata task handle that part, but that would introduce a cycle
-//     in the graph and it's just easier to keep things linear.
+//     in the graph and it's just easier to keep things linear. After it is
+//     done uploading, if the user has requested verification, it feeds into
+//     the verification queue.
 //
 // The error queue should only be used for errors that relate directly to
 // files on the local filesystem or in the cloud. It shouldn't be used for
@@ -61,6 +63,12 @@ fn main() -> Result<(), wuffblob::error::WuffError> {
         .arg(
             clap::Arg::new("force")
                 .long("force")
+                .short('f')
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            clap::Arg::new("verify")
+                .long("verify")
                 .short('f')
                 .action(clap::ArgAction::SetTrue),
         );

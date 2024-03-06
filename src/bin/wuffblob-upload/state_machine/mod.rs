@@ -20,6 +20,10 @@ pub enum UploaderState {
     // Please put me into the queue to be uploaded. When I get there, I
     // will/won't need to be deleted first.
     Upload(bool),
+
+    // Please put me into the queue to be verified. I am a file. Directories
+    // don't get here.
+    Verify,
 }
 
 #[derive(Debug)]
@@ -85,7 +89,12 @@ impl Uploader {
                 &self.state
             );
         }
-        assert!(self.remote_metadata.is_none());
+
+        if self.local_metadata.file_type().is_file() {
+            self.state = UploaderState::Upload(false);
+        } else {
+            self.state = UploaderState::Mkdir;
+        }
     }
 
     pub fn provide_remote_metadata(
@@ -100,6 +109,41 @@ impl Uploader {
             );
         }
         self.remote_metadata = Some(remote_metadata);
+        let remote_metadata: &azure_storage_blobs::blob::BlobProperties =
+            self.remote_metadata.as_ref().unwrap();
+
+        let mut remote_is_dir: bool = false;
+        if let Some(ref resource_type) = remote_metadata.resource_type {
+            if resource_type == "directory" {
+                remote_is_dir = true;
+            }
+        }
+
+        if self.local_metadata.file_type().is_file() {
+            if remote_is_dir {
+                self.set_state_to_remote_error("is directory, not file");
+            } else {
+                if remote_metadata.content_md5.is_none() {
+                    self.set_state_to_remote_error("no hash, please run wuffblob-fsck");
+                } else if remote_metadata.content_length == self.local_metadata.len() {
+                    self.state = UploaderState::Hash;
+                } else if ctx.force {
+                    self.state = UploaderState::Upload(true);
+                } else {
+                    self.set_state_to_remote_error(format!(
+                        "is {} bytes, should be {}",
+                        remote_metadata.content_length,
+                        self.local_metadata.len()
+                    ));
+                }
+            }
+        } else {
+            if remote_is_dir {
+                self.state = UploaderState::Ok;
+            } else {
+                self.set_state_to_remote_error("is file, not directory");
+            }
+        }
     }
 
     pub fn hash_failed(
@@ -111,15 +155,30 @@ impl Uploader {
             panic!("State is {:?}, expected UploaderState::Hash", &self.state);
         }
 
-        self.set_state_to_remote_error(err);
+        self.set_state_to_local_error(err);
     }
 
     pub fn provide_hash(&mut self, ctx: &std::sync::Arc<crate::ctx::Ctx>, empirical_md5: [u8; 16]) {
         if !matches!(self.state, UploaderState::Hash) {
             panic!("State is {:?}, expected UploaderState::Hash", &self.state);
         }
+        let remote_metadata: &azure_storage_blobs::blob::BlobProperties =
+            self.remote_metadata.as_ref().unwrap();
 
         self.local_md5 = Some(empirical_md5);
+        if self.local_md5.as_ref().unwrap()
+            == remote_metadata.content_md5.as_ref().unwrap().as_slice()
+        {
+            self.state = UploaderState::Ok;
+        } else if ctx.force {
+            self.state = UploaderState::Upload(true);
+        } else {
+            self.set_state_to_remote_error(format!(
+                "is {} bytes, should be {}",
+                remote_metadata.content_length,
+                self.local_metadata.len()
+            ));
+        }
     }
 
     pub fn mkdir_failed(
@@ -138,6 +197,8 @@ impl Uploader {
         if !matches!(self.state, UploaderState::Mkdir) {
             panic!("State is {:?}, expected UploaderState::Mkdir", &self.state);
         }
+
+        self.state = UploaderState::Ok;
     }
 
     pub fn upload_failed(
@@ -156,6 +217,32 @@ impl Uploader {
         if !matches!(self.state, UploaderState::Upload(_)) {
             panic!("State is {:?}, expected UploaderState::Upload", &self.state);
         }
+
+        self.state = if ctx.verify {
+            UploaderState::Verify
+        } else {
+            UploaderState::Ok
+        };
+    }
+
+    pub fn verify_failed(
+        &mut self,
+        ctx: &std::sync::Arc<crate::ctx::Ctx>,
+        err: &wuffblob::error::WuffError,
+    ) {
+        if !matches!(self.state, UploaderState::Verify) {
+            panic!("State is {:?}, expected UploaderState::Verify", &self.state);
+        }
+
+        self.set_state_to_remote_error(err);
+    }
+
+    pub fn verify_succeeded(&mut self, ctx: &std::sync::Arc<crate::ctx::Ctx>) {
+        if !matches!(self.state, UploaderState::Verify) {
+            panic!("State is {:?}, expected UploaderState::Verify", &self.state);
+        }
+
+        self.state = UploaderState::Ok;
     }
 
     fn set_state_to_local_error<T>(&mut self, err: T)
@@ -641,8 +728,9 @@ fn file_goes_to_error_if_upload_fails() {
 }
 
 #[test]
-fn file_goes_to_ok_if_upload_succeeds() {
-    let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+fn file_goes_to_ok_if_upload_succeeds_and_not_verify() {
+    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    std::sync::Arc::get_mut(&mut ctx).unwrap().verify = false;
     let mut uploader = Uploader::new(
         &ctx,
         "foo/bar.txt".into(),
@@ -662,6 +750,108 @@ fn file_goes_to_ok_if_upload_succeeds() {
     );
 
     uploader.upload_succeeded(&ctx);
+    assert!(
+        matches!(uploader.state, UploaderState::Ok),
+        "State: {:?}",
+        &uploader.state
+    );
+}
+
+#[test]
+fn file_goes_to_verify_if_upload_succeeds_and_verify() {
+    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    std::sync::Arc::get_mut(&mut ctx).unwrap().verify = true;
+    let mut uploader = Uploader::new(
+        &ctx,
+        "foo/bar.txt".into(),
+        "foo/bar.txt".into(),
+        wuffblob::util::fake_local_metadata(Some(23)),
+    );
+    assert!(
+        matches!(uploader.state, UploaderState::GetRemoteMetadata),
+        "State: {:?}",
+        &uploader.state
+    );
+    uploader.there_is_no_remote_metadata(&ctx);
+    assert!(
+        matches!(uploader.state, UploaderState::Upload(false)),
+        "State: {:?}",
+        &uploader.state
+    );
+
+    uploader.upload_succeeded(&ctx);
+    assert!(
+        matches!(uploader.state, UploaderState::Verify),
+        "State: {:?}",
+        &uploader.state
+    );
+}
+
+#[test]
+fn file_goes_to_error_if_verify_fails() {
+    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    std::sync::Arc::get_mut(&mut ctx).unwrap().verify = true;
+    let mut uploader = Uploader::new(
+        &ctx,
+        "foo/bar.txt".into(),
+        "foo/bar.txt".into(),
+        wuffblob::util::fake_local_metadata(Some(23)),
+    );
+    assert!(
+        matches!(uploader.state, UploaderState::GetRemoteMetadata),
+        "State: {:?}",
+        &uploader.state
+    );
+    uploader.there_is_no_remote_metadata(&ctx);
+    assert!(
+        matches!(uploader.state, UploaderState::Upload(false)),
+        "State: {:?}",
+        &uploader.state
+    );
+    uploader.upload_succeeded(&ctx);
+    assert!(
+        matches!(uploader.state, UploaderState::Verify),
+        "State: {:?}",
+        &uploader.state
+    );
+
+    uploader.verify_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    assert!(
+        matches!(uploader.state, UploaderState::Error(_)),
+        "State: {:?}",
+        &uploader.state
+    );
+}
+
+#[test]
+fn file_goes_to_ok_if_verify_succeeds() {
+    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    std::sync::Arc::get_mut(&mut ctx).unwrap().verify = true;
+    let mut uploader = Uploader::new(
+        &ctx,
+        "foo/bar.txt".into(),
+        "foo/bar.txt".into(),
+        wuffblob::util::fake_local_metadata(Some(23)),
+    );
+    assert!(
+        matches!(uploader.state, UploaderState::GetRemoteMetadata),
+        "State: {:?}",
+        &uploader.state
+    );
+    uploader.there_is_no_remote_metadata(&ctx);
+    assert!(
+        matches!(uploader.state, UploaderState::Upload(false)),
+        "State: {:?}",
+        &uploader.state
+    );
+    uploader.upload_succeeded(&ctx);
+    assert!(
+        matches!(uploader.state, UploaderState::Verify),
+        "State: {:?}",
+        &uploader.state
+    );
+
+    uploader.verify_succeeded(&ctx);
     assert!(
         matches!(uploader.state, UploaderState::Ok),
         "State: {:?}",

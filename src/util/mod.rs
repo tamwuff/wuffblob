@@ -113,7 +113,7 @@ pub fn hex_encode(buf: &[u8]) -> String {
 // constructor. The only way I can find to do it is to actually create
 // real temporary files/directories...!
 #[allow(dead_code)]
-pub fn fake_local_metadata(desired_size: Option<usize>) -> std::fs::Metadata {
+pub fn fake_local_metadata(desired_size: Option<u64>) -> std::fs::Metadata {
     let mut rng: rand::rngs::ThreadRng = rand::thread_rng();
     let mut uuid_buf: [u8; 16] = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rng, &mut uuid_buf);
@@ -131,12 +131,12 @@ pub fn fake_local_metadata(desired_size: Option<usize>) -> std::fs::Metadata {
         file_name.push(&uuid_str);
         let file_name_for_panic: String = format!("{:?}", &file_name);
         let f: std::fs::File = std::fs::File::create(&file_name).expect(&file_name_for_panic);
-        f.set_len(nbytes as u64).expect(&file_name_for_panic);
+        f.set_len(nbytes).expect(&file_name_for_panic);
         drop(f);
 
         metadata = std::fs::metadata(&file_name).expect(&file_name_for_panic);
         assert!(metadata.file_type().is_file());
-        assert!(metadata.len() == (nbytes as u64));
+        assert!(metadata.len() == nbytes);
 
         std::fs::remove_file(&file_name).expect(&file_name_for_panic);
     } else {

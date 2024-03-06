@@ -15,6 +15,8 @@ pub struct Stats {
     bytes_need_upload: u64,
     files_uploaded: u64,
     bytes_uploaded: u64,
+    files_verified: u64,
+    bytes_verified: u64,
 }
 
 impl Stats {
@@ -35,6 +37,8 @@ impl Stats {
             bytes_need_upload: 0u64,
             files_uploaded: 0u64,
             bytes_uploaded: 0u64,
+            files_verified: 0u64,
+            bytes_verified: 0u64,
         }
     }
 }
@@ -43,6 +47,7 @@ pub struct Ctx {
     pub base_ctx: std::sync::Arc<wuffblob::ctx::Ctx>,
     pub to_upload: Vec<(std::path::PathBuf, wuffblob::path::WuffPath)>,
     pub force: bool,
+    pub verify: bool,
     pub stats: std::sync::Mutex<Stats>,
 }
 
@@ -55,6 +60,7 @@ impl Ctx {
             base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new(&cmdline_matches)?),
             to_upload: to_upload,
             force: *(cmdline_matches.get_one::<bool>("force").unwrap()),
+            verify: *(cmdline_matches.get_one::<bool>("verify").unwrap()),
             stats: std::sync::Mutex::new(crate::ctx::Stats::new()),
         })
     }
@@ -66,6 +72,7 @@ impl Ctx {
             base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new_minimal()),
             to_upload: vec![(from_path.into(), to_path.into())],
             force: false,
+            verify: false,
             stats: std::sync::Mutex::new(crate::ctx::Stats::new()),
         }
     }
@@ -136,6 +143,15 @@ pub fn siginfo_handler(ctx: &std::sync::Arc<Ctx>) {
             stats.bytes_uploaded,
             stats.bytes_need_upload,
         ));
+        if ctx.verify {
+            s.push_str(&format!(
+                "Verified: {} of {} ({} of {} bytes)\n",
+                stats.files_verified,
+                stats.files_need_upload,
+                stats.bytes_verified,
+                stats.bytes_need_upload,
+            ));
+        }
         s.push_str("\n");
     }
 
