@@ -108,45 +108,64 @@ pub fn hex_encode(buf: &[u8]) -> String {
     s
 }
 
-// For unit testing we want to be able to make Metadata objects to our
-// specifications. This is really painful, since there is no public
-// constructor. The only way I can find to do it is to actually create
-// real temporary files/directories...!
-#[allow(dead_code)]
-pub fn fake_local_metadata(desired_size: Option<u64>) -> std::fs::Metadata {
+// For unit testing we want to be able to make Metadata objects or File objects
+// to our specifications. There is no public constructor for Metadata, so the
+// only way to get one is to actually create real temporary files/directories.
+// Which is the same thing we need to do to make a File object for unit
+// testing, too.
+fn make_temp_file_or_dir(contents: Option<&[u8]>) -> (std::fs::Metadata, Option<std::fs::File>) {
     let mut rng: rand::rngs::ThreadRng = rand::thread_rng();
     let mut uuid_buf: [u8; 16] = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rng, &mut uuid_buf);
     let uuid_str: String = hex_encode(&uuid_buf);
 
     let metadata: std::fs::Metadata;
+    let mut f: Option<std::fs::File> = None;
 
     let mut dir_name: std::path::PathBuf = std::env::temp_dir();
     dir_name.push(&uuid_str);
     let dir_name_for_panic: String = format!("{:?}", &dir_name);
     std::fs::create_dir(&dir_name).expect(&dir_name_for_panic);
 
-    if let Some(nbytes) = desired_size {
+    if let Some(buf) = contents {
         let mut file_name: std::path::PathBuf = dir_name.clone();
         file_name.push(&uuid_str);
         let file_name_for_panic: String = format!("{:?}", &file_name);
-        let f: std::fs::File = std::fs::File::create(&file_name).expect(&file_name_for_panic);
-        f.set_len(nbytes).expect(&file_name_for_panic);
-        drop(f);
+        std::io::Write::write_all(
+            &mut (std::fs::File::create(&file_name).expect(&file_name_for_panic)),
+            buf,
+        )
+        .expect(&file_name_for_panic);
 
         metadata = std::fs::metadata(&file_name).expect(&file_name_for_panic);
-        assert!(metadata.file_type().is_file());
-        assert!(metadata.len() == nbytes);
+        f = Some(std::fs::File::open(&file_name).expect(&file_name_for_panic));
 
         std::fs::remove_file(&file_name).expect(&file_name_for_panic);
     } else {
         metadata = std::fs::metadata(&dir_name).expect(&dir_name_for_panic);
-        assert!(metadata.file_type().is_dir());
     }
 
     std::fs::remove_dir(&dir_name).expect(&dir_name_for_panic);
 
+    (metadata, f)
+}
+
+#[allow(dead_code)]
+pub fn fake_local_metadata(desired_size: Option<u64>) -> std::fs::Metadata {
+    let (metadata, f) = if let Some(nbytes) = desired_size {
+        let mut v: Vec<u8> = Vec::with_capacity(nbytes as usize);
+        v.resize(nbytes as usize, 0);
+        make_temp_file_or_dir(Some(v.as_slice()))
+    } else {
+        make_temp_file_or_dir(None)
+    };
     metadata
+}
+
+#[allow(dead_code)]
+pub fn temp_local_file(contents: &str) -> std::fs::File {
+    let (metadata, f) = make_temp_file_or_dir(Some(contents.as_bytes()));
+    f.unwrap()
 }
 
 // For unit testing we want to be able to make BlobProperties objects to our
@@ -207,6 +226,34 @@ fn hex_nonempty() {
     let v = vec![185u8, 74u8, 155u8, 38u8, 162u8];
     let s = hex_encode(&v);
     assert_eq!(s, "b94a9b26a2");
+}
+
+#[test]
+fn make_fake_local_metadata_for_file() {
+    let metadata = fake_local_metadata(Some(23));
+    assert!(metadata.file_type().is_file());
+    assert!(metadata.len() == 23);
+}
+
+#[test]
+fn make_fake_local_metadata_for_directory() {
+    let metadata = fake_local_metadata(None);
+    assert!(metadata.file_type().is_dir());
+}
+
+#[test]
+fn make_temp_local_file() {
+    let mut buf: [u8; 13] = [0u8; 13];
+    let mut f = temp_local_file("Hello, world!");
+
+    assert_eq!(std::io::Seek::stream_position(&mut f).unwrap(), 0);
+    std::io::Read::read_exact(&mut f, &mut buf).expect("wrong number of bytes");
+
+    assert_eq!(std::io::Seek::stream_position(&mut f).unwrap(), 13);
+    assert_eq!(
+        std::io::Read::read(&mut f, &mut buf).expect("unexpected error"),
+        0
+    );
 }
 
 #[test]

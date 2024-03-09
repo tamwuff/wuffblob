@@ -8,6 +8,7 @@
 // (a) you get the right answer, or (b) if you don't get the right answer,
 // it's not a silent failure, you know that you didn't get the right answer.
 
+#[derive(Debug)]
 pub struct BulletproofHasher {
     hasher: md5::Md5,
     off: u64,
@@ -26,7 +27,7 @@ impl BulletproofHasher {
             return;
         }
         let chop_off: usize = (self.off - off) as usize;
-        if chop_off > buf.len() {
+        if chop_off >= buf.len() {
             return;
         }
         buf = &buf[chop_off..];
@@ -34,14 +35,17 @@ impl BulletproofHasher {
         self.off += buf.len() as u64;
     }
 
-    pub fn finalize(self, off: u64) -> Result<[u8; 16], crate::error::WuffError> {
+    pub fn digest(&self, off: u64) -> Result<[u8; 16], crate::error::WuffError> {
         if off == self.off {
-            Ok(<md5::Md5 as md5::Digest>::finalize(self.hasher)
+            Ok(<md5::Md5 as md5::Digest>::finalize(self.hasher.clone())
                 .as_slice()
                 .try_into()
                 .unwrap())
         } else {
-            Err(crate::error::WuffError::from(format!("")))
+            Err(crate::error::WuffError::from(format!(
+                "hashed up to {}, size was asserted as {}",
+                self.off, off
+            )))
         }
     }
 }
@@ -54,7 +58,7 @@ fn empty() {
         0x98u8, 0xecu8, 0xf8u8, 0x42u8, 0x7eu8,
     ];
     let mut hasher = BulletproofHasher::new();
-    let hash = hasher.finalize(0);
+    let hash = hasher.digest(0);
     assert!(hash.is_ok());
     assert_eq!(hash.unwrap(), correct_hash);
 }
@@ -68,7 +72,7 @@ fn one_shot_correct_length() {
     ];
     let mut hasher = BulletproofHasher::new();
     hasher.update(0, b"Hello, world!");
-    let hash = hasher.finalize(13);
+    let hash = hasher.digest(13);
     assert!(hash.is_ok());
     assert_eq!(hash.unwrap(), correct_hash);
 }
@@ -77,7 +81,7 @@ fn one_shot_correct_length() {
 fn one_shot_incorrect_length() {
     let mut hasher = BulletproofHasher::new();
     hasher.update(0, b"Hello, world!");
-    let hash = hasher.finalize(15); // correct length is 13
+    let hash = hasher.digest(15); // correct length is 13
     assert!(hash.is_err());
 }
 
@@ -85,7 +89,7 @@ fn one_shot_incorrect_length() {
 fn gap() {
     let mut hasher = BulletproofHasher::new();
     hasher.update(1, b"ello, world!");
-    let hash = hasher.finalize(13);
+    let hash = hasher.digest(13);
     assert!(hash.is_err());
 }
 
@@ -125,7 +129,7 @@ fn multi_pass() {
     // 10 - 13
     hasher.update(10, b"ld!");
 
-    let hash = hasher.finalize(13);
+    let hash = hasher.digest(13);
     assert!(hash.is_ok());
     assert_eq!(hash.unwrap(), correct_hash);
 }
