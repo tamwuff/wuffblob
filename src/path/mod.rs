@@ -34,8 +34,11 @@ impl WuffPath {
             if as_slice[i] == ('/' as u8) {
                 components.push(std::ffi::OsString::new());
             } else {
-                let c: &std::ffi::OsStr =
-                    unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(&as_slice[i..=i]) };
+                let c: &std::ffi::OsStr = unsafe {
+                    std::ffi::OsStr::from_encoded_bytes_unchecked(
+                        &as_slice[i..=i],
+                    )
+                };
                 components.last_mut().unwrap().push(c);
             }
         }
@@ -119,7 +122,8 @@ impl WuffPath {
         // See if that fixes it.
         self.components
             .retain(|component: &std::ffi::OsString| -> bool {
-                (!component.is_empty()) && (component != std::ffi::OsStr::new("."))
+                (!component.is_empty())
+                    && (component != std::ffi::OsStr::new("."))
             });
 
         // We didn't check for ".." or for NUL or '/' bytes. Do that now.
@@ -131,7 +135,8 @@ impl WuffPath {
     }
 
     pub fn canonicalize(self) -> Option<WuffPath> {
-        let canonicalized_or_componentless: Option<WuffPath> = self.canonicalize_or_componentless();
+        let canonicalized_or_componentless: Option<WuffPath> =
+            self.canonicalize_or_componentless();
         match canonicalized_or_componentless {
             Some(ref canonicalized) => {
                 if canonicalized.is_componentless() {
@@ -174,7 +179,9 @@ impl WuffPath {
 
     // Please only use this if you have checked that everything is either
     // canonical or componentless!
-    pub fn check_for_overlap<'a, T>(paths: T) -> Result<(), crate::error::WuffError>
+    pub fn check_for_overlap<'a, T>(
+        paths: T,
+    ) -> Result<(), crate::error::WuffError>
     where
         T: IntoIterator<Item = &'a WuffPath>,
     {
@@ -197,7 +204,9 @@ impl WuffPath {
             };
             path.all_parents(&mut cb);
             if let Some(wp) = conflict {
-                return Err(format!("paths {} and {} overlap", wp, path).into());
+                return Err(
+                    format!("paths {} and {} overlap", wp, path).into()
+                );
             }
         }
         Ok(())
@@ -219,7 +228,9 @@ impl From<&str> for WuffPath {
 impl TryFrom<&std::path::Path> for WuffPath {
     type Error = crate::error::WuffError;
 
-    fn try_from(path: &std::path::Path) -> Result<WuffPath, crate::error::WuffError> {
+    fn try_from(
+        path: &std::path::Path,
+    ) -> Result<WuffPath, crate::error::WuffError> {
         // Per the docs, Windows has something called a "prefix" and paths can
         // have prefixes, or roots, or both, or neither.
         //
@@ -232,11 +243,17 @@ impl TryFrom<&std::path::Path> for WuffPath {
         for component in path.components() {
             components.push(match component {
                 std::path::Component::Prefix(_) => {
-                    return Err(format!("{:?}: prefixes not supported", path).into());
+                    return Err(
+                        format!("{:?}: prefixes not supported", path).into()
+                    );
                 }
                 std::path::Component::RootDir => std::ffi::OsString::new(),
-                std::path::Component::CurDir => std::ffi::OsStr::new(".").to_os_string(),
-                std::path::Component::ParentDir => std::ffi::OsStr::new("..").to_os_string(),
+                std::path::Component::CurDir => {
+                    std::ffi::OsStr::new(".").to_os_string()
+                }
+                std::path::Component::ParentDir => {
+                    std::ffi::OsStr::new("..").to_os_string()
+                }
                 std::path::Component::Normal(s) => s.to_os_string(),
             });
         }

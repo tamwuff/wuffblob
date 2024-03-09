@@ -5,7 +5,10 @@ pub static DEFAULT_REGEX: &str = include_str!("mime_overrides.regex");
 pub static MINIMAL_FIXED: &str = "text/plain txt\napplication/pdf pdf\n";
 
 pub trait MimeTypes {
-    fn get_desired_mime_type(&self, basename: &std::ffi::OsStr) -> Option<&'static str>;
+    fn get_desired_mime_type(
+        &self,
+        basename: &std::ffi::OsStr,
+    ) -> Option<&'static str>;
 }
 
 trait MimeTypesPrivate: MimeTypes {
@@ -40,7 +43,8 @@ impl MimeTypesPrivate for MimeTypesFixed {
         spec: &'static str,
         mime_type: &'static str,
     ) -> Result<(), crate::error::WuffError> {
-        let mut spec_as_osstring: std::ffi::OsString = std::ffi::OsStr::new(spec).to_os_string();
+        let mut spec_as_osstring: std::ffi::OsString =
+            std::ffi::OsStr::new(spec).to_os_string();
         spec_as_osstring.make_ascii_lowercase();
         let _ = self.data.insert(spec_as_osstring, mime_type);
         Ok(())
@@ -48,7 +52,10 @@ impl MimeTypesPrivate for MimeTypesFixed {
 }
 
 impl MimeTypes for MimeTypesFixed {
-    fn get_desired_mime_type(&self, basename: &std::ffi::OsStr) -> Option<&'static str> {
+    fn get_desired_mime_type(
+        &self,
+        basename: &std::ffi::OsStr,
+    ) -> Option<&'static str> {
         let as_slice: &[u8] = basename.as_encoded_bytes();
         let mut i: usize = as_slice.len() - 1;
         loop {
@@ -60,10 +67,12 @@ impl MimeTypes for MimeTypesFixed {
             }
             i -= 1;
         }
-        let ext: &std::ffi::OsStr =
-            unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(&as_slice[(i + 1)..]) };
+        let ext: &std::ffi::OsStr = unsafe {
+            std::ffi::OsStr::from_encoded_bytes_unchecked(&as_slice[(i + 1)..])
+        };
 
-        let mut ext_as_osstring: std::ffi::OsString = std::ffi::OsStr::new(ext).to_os_string();
+        let mut ext_as_osstring: std::ffi::OsString =
+            std::ffi::OsStr::new(ext).to_os_string();
         ext_as_osstring.make_ascii_lowercase();
         self.data.get(&ext_as_osstring).copied()
     }
@@ -100,7 +109,10 @@ impl MimeTypesPrivate for MimeTypesRegex {
 }
 
 impl MimeTypes for MimeTypesRegex {
-    fn get_desired_mime_type(&self, basename: &std::ffi::OsStr) -> Option<&'static str> {
+    fn get_desired_mime_type(
+        &self,
+        basename: &std::ffi::OsStr,
+    ) -> Option<&'static str> {
         if let Some(as_str) = basename.to_str() {
             for (ref r, mime_type) in &self.data {
                 if r.is_match(as_str) {
@@ -118,11 +130,12 @@ pub fn new(
     data: &'static str,
     is_regex: bool,
 ) -> Result<Box<dyn MimeTypes + Send + Sync>, crate::error::WuffError> {
-    let r: regex::Regex = regex::RegexBuilder::new(r"^\s*([^#]\S*)\s+(\S.*?)\s*$")
-        .multi_line(true)
-        .crlf(true)
-        .build()
-        .expect("regex");
+    let r: regex::Regex =
+        regex::RegexBuilder::new(r"^\s*([^#]\S*)\s+(\S.*?)\s*$")
+            .multi_line(true)
+            .crlf(true)
+            .build()
+            .expect("regex");
 
     // Hmmmm. What I really want to do is to make a Box<dyn MimeTypesPrivate>,
     // set it to either a MimeTypesRegex or a MimeTypesFixed, and then stop

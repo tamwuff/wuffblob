@@ -62,19 +62,23 @@ impl FileChecker {
             possible_repairs: Vec::<ProposedRepair>::new(),
         };
         if !checker.path.is_canonical() {
-            checker.state = FileCheckerState::Message("path is not in canonical form".to_string());
+            checker.state = FileCheckerState::Message(
+                "path is not in canonical form".to_string(),
+            );
             ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
                 stats.any_not_repaired = true;
             });
         } else if checker.is_dir {
             // not much else to check!
         } else {
-            checker.desired_content_type = ctx.base_ctx.get_desired_mime_type(&checker.path);
+            checker.desired_content_type =
+                ctx.base_ctx.get_desired_mime_type(&checker.path);
             if checker.properties.content_md5.is_none() || !ctx.preen {
                 checker.state = FileCheckerState::Hash;
                 ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
                     stats.hash_required += 1u64;
-                    stats.hash_bytes_required += checker.properties.content_length;
+                    stats.hash_bytes_required +=
+                        checker.properties.content_length;
                 });
             } else {
                 checker.analyze(ctx);
@@ -83,19 +87,28 @@ impl FileChecker {
         checker
     }
 
-    pub fn provide_user_input(&mut self, ctx: &std::sync::Arc<crate::ctx::Ctx>, answer: bool) {
-        if let FileCheckerState::UserInteraction(ref possible_repair) = self.state {
+    pub fn provide_user_input(
+        &mut self,
+        ctx: &std::sync::Arc<crate::ctx::Ctx>,
+        answer: bool,
+    ) {
+        if let FileCheckerState::UserInteraction(ref possible_repair) =
+            self.state
+        {
             if answer {
                 match possible_repair.repair_type {
                     RepairType::ContentType => {
-                        self.properties.content_type = self.desired_content_type.to_string();
+                        self.properties.content_type =
+                            self.desired_content_type.to_string();
                     }
                     RepairType::Md5 => {
                         self.properties.content_md5 = Some(
-                            azure_storage::prelude::ConsistencyMD5::decode(base64::Engine::encode(
-                                &base64::prelude::BASE64_STANDARD,
-                                self.empirical_md5.as_ref().unwrap(),
-                            ))
+                            azure_storage::prelude::ConsistencyMD5::decode(
+                                base64::Engine::encode(
+                                    &base64::prelude::BASE64_STANDARD,
+                                    self.empirical_md5.as_ref().unwrap(),
+                                ),
+                            )
                             .unwrap(),
                         );
                     }
@@ -107,7 +120,8 @@ impl FileChecker {
                 });
             }
             if let Some(next_possible_repair) = self.possible_repairs.pop() {
-                self.state = FileCheckerState::UserInteraction(next_possible_repair);
+                self.state =
+                    FileCheckerState::UserInteraction(next_possible_repair);
             } else if self.properties_dirty {
                 self.state = FileCheckerState::UpdateProperties;
                 ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
@@ -158,7 +172,11 @@ impl FileChecker {
         });
     }
 
-    pub fn provide_hash(&mut self, ctx: &std::sync::Arc<crate::ctx::Ctx>, empirical_md5: [u8; 16]) {
+    pub fn provide_hash(
+        &mut self,
+        ctx: &std::sync::Arc<crate::ctx::Ctx>,
+        empirical_md5: [u8; 16],
+    ) {
         if let FileCheckerState::Hash = self.state {
         } else {
             panic!(
@@ -330,7 +348,11 @@ fn preen_file_with_hash_does_not_get_hashed() {
         &ctx,
         "foo/bar.txt".into(),
         false, // is_dir
-        wuffblob::util::fake_blob_properties_file("text/plain", 42, Some(&[23u8; 16])),
+        wuffblob::util::fake_blob_properties_file(
+            "text/plain",
+            42,
+            Some(&[23u8; 16]),
+        ),
     );
     assert!(
         matches!(file_checker.state, FileCheckerState::Terminal),
@@ -349,7 +371,11 @@ fn nonpreen_file_with_hash_gets_hashed() {
         &ctx,
         "foo/bar.txt".into(),
         false, // is_dir
-        wuffblob::util::fake_blob_properties_file("text/plain", 42, Some(&[23u8; 16])),
+        wuffblob::util::fake_blob_properties_file(
+            "text/plain",
+            42,
+            Some(&[23u8; 16]),
+        ),
     );
     assert!(
         matches!(file_checker.state, FileCheckerState::Hash),
@@ -368,7 +394,11 @@ fn preen_file_with_bad_content_type_suggests_repair() {
         &ctx,
         "foo/bar.txt".into(),
         false, // is_dir
-        wuffblob::util::fake_blob_properties_file("text/squirrel", 42, Some(&[23u8; 16])),
+        wuffblob::util::fake_blob_properties_file(
+            "text/squirrel",
+            42,
+            Some(&[23u8; 16]),
+        ),
     );
     assert!(
         matches!(
@@ -394,7 +424,11 @@ fn nonpreen_file_with_correct_hash_goes_to_good() {
         &ctx,
         "foo/bar.txt".into(),
         false, // is_dir
-        wuffblob::util::fake_blob_properties_file("text/plain", 42, Some(&hash)),
+        wuffblob::util::fake_blob_properties_file(
+            "text/plain",
+            42,
+            Some(&hash),
+        ),
     );
     assert!(
         matches!(file_checker.state, FileCheckerState::Hash),
@@ -433,7 +467,8 @@ fn hash_failed_goes_to_message() {
     );
 
     // Oops, the hash failed.
-    file_checker.hash_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    file_checker
+        .hash_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
 
     // It should be in Message now.
     assert!(
@@ -457,7 +492,11 @@ fn file_with_crazy_everything_goes_and_gets_itself_fixed() {
         &ctx,
         "foo/bar.txt".into(),
         false, // is_dir
-        wuffblob::util::fake_blob_properties_file("text/squirrel", 42, Some(&incorrect_hash)),
+        wuffblob::util::fake_blob_properties_file(
+            "text/squirrel",
+            42,
+            Some(&incorrect_hash),
+        ),
     );
     assert!(
         matches!(file_checker.state, FileCheckerState::Hash),
@@ -528,7 +567,11 @@ fn file_that_doesnt_really_actually_want_to_get_fully_fixed() {
         &ctx,
         "foo/bar.txt".into(),
         false, // is_dir
-        wuffblob::util::fake_blob_properties_file("text/squirrel", 42, Some(&incorrect_hash)),
+        wuffblob::util::fake_blob_properties_file(
+            "text/squirrel",
+            42,
+            Some(&incorrect_hash),
+        ),
     );
     assert!(
         matches!(file_checker.state, FileCheckerState::Hash),
@@ -617,7 +660,11 @@ fn file_that_seriously_is_not_ok_with_being_fixed_goes_straight_to_terminal() {
         &ctx,
         "foo/bar.txt".into(),
         false, // is_dir
-        wuffblob::util::fake_blob_properties_file("text/squirrel", 42, Some(&incorrect_hash)),
+        wuffblob::util::fake_blob_properties_file(
+            "text/squirrel",
+            42,
+            Some(&incorrect_hash),
+        ),
     );
     assert!(
         matches!(file_checker.state, FileCheckerState::Hash),
@@ -683,7 +730,11 @@ fn got_fixed_goes_to_good() {
         &ctx,
         "foo/bar.txt".into(),
         false, // is_dir
-        wuffblob::util::fake_blob_properties_file("text/squirrel", 42, Some(&[23u8; 16])),
+        wuffblob::util::fake_blob_properties_file(
+            "text/squirrel",
+            42,
+            Some(&[23u8; 16]),
+        ),
     );
 
     assert!(
@@ -730,7 +781,11 @@ fn didnt_get_fixed() {
         &ctx,
         "foo/bar.txt".into(),
         false, // is_dir
-        wuffblob::util::fake_blob_properties_file("text/squirrel", 42, Some(&[23u8; 16])),
+        wuffblob::util::fake_blob_properties_file(
+            "text/squirrel",
+            42,
+            Some(&[23u8; 16]),
+        ),
     );
 
     assert!(
@@ -755,7 +810,10 @@ fn didnt_get_fixed() {
     assert_eq!(file_checker.properties.content_type, "text/plain");
 
     // Let's pretend the property change failed.
-    file_checker.update_properties_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    file_checker.update_properties_failed(
+        &ctx,
+        &wuffblob::error::WuffError::from("squeeeee"),
+    );
 
     assert!(
         matches!(file_checker.state, FileCheckerState::Message(_)),

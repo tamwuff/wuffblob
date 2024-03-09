@@ -57,7 +57,9 @@ impl Ctx {
         to_upload: Vec<(std::path::PathBuf, wuffblob::path::WuffPath)>,
     ) -> Result<Ctx, wuffblob::error::WuffError> {
         Ok(Ctx {
-            base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new(&cmdline_matches)?),
+            base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new(
+                &cmdline_matches,
+            )?),
             to_upload: to_upload,
             force: *(cmdline_matches.get_one::<bool>("force").unwrap()),
             verify: *(cmdline_matches.get_one::<bool>("verify").unwrap()),
@@ -126,11 +128,17 @@ pub fn siginfo_handler(ctx: &std::sync::Arc<Ctx>) {
     if stats.files_found > 0u64 {
         s.push_str(&format!(
             "Can reuse: {} of {} ({} of {} bytes)\n",
-            stats.files_can_reuse, stats.files_found, stats.bytes_can_reuse, stats.bytes_found
+            stats.files_can_reuse,
+            stats.files_found,
+            stats.bytes_can_reuse,
+            stats.bytes_found
         ));
         s.push_str(&format!(
             "Need to upload: {} of {} ({} of {} bytes)\n",
-            stats.files_need_upload, stats.files_found, stats.bytes_need_upload, stats.bytes_found
+            stats.files_need_upload,
+            stats.files_found,
+            stats.bytes_need_upload,
+            stats.bytes_found
         ));
         s.push_str("\n");
     }

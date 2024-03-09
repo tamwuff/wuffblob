@@ -5,7 +5,8 @@ pub struct Ctx {
     tokio_runtime: tokio::runtime::Runtime,
     data_concurrency: u16,
     metadata_concurrency: u16,
-    mime_type_guessers: Vec<Box<dyn crate::mimetypes::MimeTypes + Sync + Send>>,
+    mime_type_guessers:
+        Vec<Box<dyn crate::mimetypes::MimeTypes + Sync + Send>>,
 }
 
 // I looked on https://docs.rs/platforms/latest/platforms/target/enum.OS.html
@@ -92,40 +93,53 @@ pub fn make_cmdline_parser(argv0: &'static str) -> clap::Command {
 }
 
 impl Ctx {
-    pub fn new(cmdline_matches: &clap::ArgMatches) -> Result<Ctx, crate::error::WuffError> {
+    pub fn new(
+        cmdline_matches: &clap::ArgMatches,
+    ) -> Result<Ctx, crate::error::WuffError> {
         let storage_account: &String = cmdline_matches
             .get_one::<String>("storage_account")
             .unwrap();
-        let container: &String = cmdline_matches.get_one::<String>("container").unwrap();
+        let container: &String =
+            cmdline_matches.get_one::<String>("container").unwrap();
 
         let mut access_key: String = String::new();
         if let Ok(s) = std::env::var("WUFFBLOB_ACCESS_KEY") {
             access_key = s;
         } else {
-            print!("Enter access key for storage account {}: ", storage_account);
-            std::io::Write::flush(&mut std::io::stdout().lock()).expect("stdout");
-            std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut access_key)
-                .expect("stdin");
+            print!(
+                "Enter access key for storage account {}: ",
+                storage_account
+            );
+            std::io::Write::flush(&mut std::io::stdout().lock())
+                .expect("stdout");
+            std::io::BufRead::read_line(
+                &mut std::io::stdin().lock(),
+                &mut access_key,
+            )
+            .expect("stdin");
         }
 
         access_key = String::from(access_key.trim());
 
-        let mut mime_type_guessers: Vec<Box<dyn crate::mimetypes::MimeTypes + Sync + Send>> =
-            Vec::new();
+        let mut mime_type_guessers: Vec<
+            Box<dyn crate::mimetypes::MimeTypes + Sync + Send>,
+        > = Vec::new();
         // If the user has passed in their own, add them first so they will be
         // checked first
         if let Some(mime_types_filename) =
             cmdline_matches.get_one::<std::path::PathBuf>("mime_types_regex")
         {
-            let contents: &'static str =
-                Box::leak(std::fs::read_to_string(mime_types_filename)?.into_boxed_str());
+            let contents: &'static str = Box::leak(
+                std::fs::read_to_string(mime_types_filename)?.into_boxed_str(),
+            );
             mime_type_guessers.push(crate::mimetypes::new(contents, true)?);
         }
         if let Some(mime_types_filename) =
             cmdline_matches.get_one::<std::path::PathBuf>("mime_types")
         {
-            let contents: &'static str =
-                Box::leak(std::fs::read_to_string(mime_types_filename)?.into_boxed_str());
+            let contents: &'static str = Box::leak(
+                std::fs::read_to_string(mime_types_filename)?.into_boxed_str(),
+            );
             mime_type_guessers.push(crate::mimetypes::new(contents, false)?);
         }
         // OK, now put in the standard ones.
@@ -141,12 +155,18 @@ impl Ctx {
         Ok(Ctx {
             verbose: *(cmdline_matches.get_one::<bool>("verbose").unwrap()),
             dry_run: *(cmdline_matches.get_one::<bool>("dry_run").unwrap()),
-            azure_client: crate::azure::AzureClient::new(storage_account, &access_key, container),
+            azure_client: crate::azure::AzureClient::new(
+                storage_account,
+                &access_key,
+                container,
+            ),
             tokio_runtime: tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("tokio"),
-            data_concurrency: *(cmdline_matches.get_one::<u16>("data_concurrency").unwrap()),
+            data_concurrency: *(cmdline_matches
+                .get_one::<u16>("data_concurrency")
+                .unwrap()),
             metadata_concurrency: *(cmdline_matches
                 .get_one::<u16>("metadata_concurrency")
                 .unwrap()),
@@ -172,13 +192,18 @@ impl Ctx {
                 .expect("tokio"),
             data_concurrency: 1u16,
             metadata_concurrency: 1u16,
-            mime_type_guessers: vec![
-                crate::mimetypes::new(crate::mimetypes::MINIMAL_FIXED, false).expect("mime types"),
-            ],
+            mime_type_guessers: vec![crate::mimetypes::new(
+                crate::mimetypes::MINIMAL_FIXED,
+                false,
+            )
+            .expect("mime types")],
         }
     }
 
-    pub fn run_async_main<F>(&self, f: F) -> Result<(), crate::error::WuffError>
+    pub fn run_async_main<F>(
+        &self,
+        f: F,
+    ) -> Result<(), crate::error::WuffError>
     where
         F: std::future::Future<Output = Result<(), crate::error::WuffError>>,
     {
@@ -186,12 +211,17 @@ impl Ctx {
     }
 
     #[cfg(unix)]
-    pub fn install_siginfo_handler<F>(&self, cb: F) -> Result<(), crate::error::WuffError>
+    pub fn install_siginfo_handler<F>(
+        &self,
+        cb: F,
+    ) -> Result<(), crate::error::WuffError>
     where
         F: Fn() + Send + 'static,
     {
-        let sig_num: tokio::signal::unix::SignalKind = what_is_siginfo_on_this_platform();
-        let mut signal_waiter: tokio::signal::unix::Signal = tokio::signal::unix::signal(sig_num)?;
+        let sig_num: tokio::signal::unix::SignalKind =
+            what_is_siginfo_on_this_platform();
+        let mut signal_waiter: tokio::signal::unix::Signal =
+            tokio::signal::unix::signal(sig_num)?;
         let _ = self.get_async_spawner().spawn(async move {
             loop {
                 signal_waiter.recv().await;
@@ -202,7 +232,10 @@ impl Ctx {
     }
 
     #[cfg(not(unix))]
-    pub fn install_siginfo_handler<F>(&self, _cb: F) -> Result<(), crate::error::WuffError>
+    pub fn install_siginfo_handler<F>(
+        &self,
+        _cb: F,
+    ) -> Result<(), crate::error::WuffError>
     where
         F: Fn() + Send + 'static,
     {
@@ -213,20 +246,31 @@ impl Ctx {
         self.tokio_runtime.handle()
     }
 
-    pub fn data_concurrency_mgr<T: Send + 'static>(&self) -> crate::util::BoundedParallelism<T> {
-        return crate::util::BoundedParallelism::<T>::new(self.data_concurrency);
+    pub fn data_concurrency_mgr<T: Send + 'static>(
+        &self,
+    ) -> crate::util::BoundedParallelism<T> {
+        return crate::util::BoundedParallelism::<T>::new(
+            self.data_concurrency,
+        );
     }
 
     pub fn metadata_concurrency_mgr<T: Send + 'static>(
         &self,
     ) -> crate::util::BoundedParallelism<T> {
-        return crate::util::BoundedParallelism::<T>::new(self.metadata_concurrency);
+        return crate::util::BoundedParallelism::<T>::new(
+            self.metadata_concurrency,
+        );
     }
 
-    pub fn get_desired_mime_type(&self, path: &crate::path::WuffPath) -> &'static str {
+    pub fn get_desired_mime_type(
+        &self,
+        path: &crate::path::WuffPath,
+    ) -> &'static str {
         if let Some(basename) = path.basename() {
             for mime_type_guesser in &self.mime_type_guessers {
-                if let Some(mime_type) = mime_type_guesser.get_desired_mime_type(basename) {
+                if let Some(mime_type) =
+                    mime_type_guesser.get_desired_mime_type(basename)
+                {
                     return mime_type;
                 }
             }

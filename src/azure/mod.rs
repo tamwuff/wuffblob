@@ -5,25 +5,31 @@ pub struct AzureClient {
 }
 
 impl AzureClient {
-    pub fn new(storage_account: &str, access_key: &str, container: &str) -> AzureClient {
+    pub fn new(
+        storage_account: &str,
+        access_key: &str,
+        container: &str,
+    ) -> AzureClient {
         AzureClient {
-            container_client: azure_storage_blobs::prelude::ClientBuilder::new(
-                storage_account,
-                azure_storage::StorageCredentials::access_key(
+            container_client:
+                azure_storage_blobs::prelude::ClientBuilder::new(
                     storage_account,
-                    access_key.to_string(),
-                ),
-            )
-            .container_client(container),
-            data_lake_client: azure_storage_datalake::clients::DataLakeClientBuilder::new(
-                storage_account,
-                azure_storage::StorageCredentials::access_key(
+                    azure_storage::StorageCredentials::access_key(
+                        storage_account,
+                        access_key.to_string(),
+                    ),
+                )
+                .container_client(container),
+            data_lake_client:
+                azure_storage_datalake::clients::DataLakeClientBuilder::new(
                     storage_account,
-                    access_key.to_string(),
-                ),
-            )
-            .build()
-            .file_system_client(container),
+                    azure_storage::StorageCredentials::access_key(
+                        storage_account,
+                        access_key.to_string(),
+                    ),
+                )
+                .build()
+                .file_system_client(container),
         }
     }
 }
@@ -37,7 +43,8 @@ struct FileForUploadInsideMutex {
 
 impl FileForUploadInsideMutex {
     fn seek(&mut self, off: u64) -> std::io::Result<()> {
-        self.off = std::io::Seek::seek(&mut self.f, std::io::SeekFrom::Start(off))?;
+        self.off =
+            std::io::Seek::seek(&mut self.f, std::io::SeekFrom::Start(off))?;
         debug_assert!(self.off == off);
         Ok(())
     }
@@ -64,14 +71,20 @@ impl azure_core::SeekableStream for FileChunkForUpload {
     fn reset<'a, 'fut>(
         &'a mut self,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(), azure_core::error::Error>> + Send + 'fut>,
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(), azure_core::error::Error>,
+                > + Send
+                + 'fut,
+        >,
     >
     where
         Self: 'fut,
         'a: 'fut,
     {
         Box::pin(async {
-            let mut inside_mutex = self.inside_mutex.lock().expect("FileChunkForUpload");
+            let mut inside_mutex =
+                self.inside_mutex.lock().expect("FileChunkForUpload");
             inside_mutex.seek(self.off_start)?;
             Ok(())
         })
@@ -97,9 +110,11 @@ impl futures::io::AsyncRead for FileChunkForUpload {
         cx: &mut std::task::Context<'_>,
         mut buf: &mut [u8],
     ) -> std::task::Poll<Result<usize, futures::io::Error>> {
-        let mut inside_mutex = self.inside_mutex.lock().expect("FileChunkForUpload");
+        let mut inside_mutex =
+            self.inside_mutex.lock().expect("FileChunkForUpload");
         debug_assert!(
-            std::io::Seek::stream_position(&mut inside_mutex.f).expect("lseek()")
+            std::io::Seek::stream_position(&mut inside_mutex.f)
+                .expect("lseek()")
                 == inside_mutex.off
         );
 
@@ -115,9 +130,11 @@ impl futures::io::AsyncRead for FileChunkForUpload {
         }
 
         if let Err(e) = std::io::Read::read_exact(&mut inside_mutex.f, buf) {
-            // we have no idea what the file's actual offset is now, so reset that
+            // we have no idea what the file's actual offset is now, so reset
+            // that
             inside_mutex.off =
-                std::io::Seek::stream_position(&mut inside_mutex.f).expect("lseek()");
+                std::io::Seek::stream_position(&mut inside_mutex.f)
+                    .expect("lseek()");
             return std::task::Poll::Ready(Err(e.into()));
         }
         inside_mutex.off += buf.len() as u64;
@@ -125,7 +142,8 @@ impl futures::io::AsyncRead for FileChunkForUpload {
         inside_mutex.bph.update(off, buf);
 
         debug_assert!(
-            std::io::Seek::stream_position(&mut inside_mutex.f).expect("lseek()")
+            std::io::Seek::stream_position(&mut inside_mutex.f)
+                .expect("lseek()")
                 == inside_mutex.off
         );
         std::task::Poll::Ready(Ok(buf.len()))
@@ -149,25 +167,31 @@ pub struct FileForUpload {
 
 impl FileForUpload {
     pub fn new(mut f: std::fs::File, metadata: &std::fs::Metadata) -> Self {
-        let off: u64 = std::io::Seek::stream_position(&mut f).expect("lseek()");
+        let off: u64 =
+            std::io::Seek::stream_position(&mut f).expect("lseek()");
 
         FileForUpload {
-            inside_mutex: std::sync::Arc::new(std::sync::Mutex::new(FileForUploadInsideMutex {
-                f: f,
-                off: off,
-                bph: crate::bph::BulletproofHasher::new(),
-            })),
+            inside_mutex: std::sync::Arc::new(std::sync::Mutex::new(
+                FileForUploadInsideMutex {
+                    f: f,
+                    off: off,
+                    bph: crate::bph::BulletproofHasher::new(),
+                },
+            )),
             len: metadata.len(),
             blob_block_size: Self::calc_blob_block_size(metadata.len()),
 
             #[cfg(unix)]
-            blksize: Self::calc_blksize(std::os::unix::fs::MetadataExt::blksize(metadata) as usize),
+            blksize: Self::calc_blksize(
+                std::os::unix::fs::MetadataExt::blksize(metadata) as usize,
+            ),
         }
     }
 
     pub fn num_blob_blocks(&self) -> u16 {
         assert!(self.blob_block_size > 0);
-        let nblocks: u64 = (self.len + self.blob_block_size - 1) / self.blob_block_size;
+        let nblocks: u64 =
+            (self.len + self.blob_block_size - 1) / self.blob_block_size;
         assert!(nblocks < 65536);
         nblocks as u16
     }
@@ -180,7 +204,8 @@ impl FileForUpload {
         }
 
         {
-            let mut inside_mutex = self.inside_mutex.lock().expect("FileForUpload");
+            let mut inside_mutex =
+                self.inside_mutex.lock().expect("FileForUpload");
             inside_mutex.seek(off_start).expect("lseek()");
         }
 
@@ -195,7 +220,8 @@ impl FileForUpload {
     }
 
     pub fn get_hash(&self) -> Result<[u8; 16], crate::error::WuffError> {
-        let mut inside_mutex = self.inside_mutex.lock().expect("FileForUpload");
+        let mut inside_mutex =
+            self.inside_mutex.lock().expect("FileForUpload");
         inside_mutex.bph.digest(self.len)
     }
 
@@ -304,8 +330,8 @@ fn blob_block_size_64tb() {
 fn read_three_chunks_in_all_kinds_of_wild_and_crazy_ways() {
     // echo -n 'Hello, world!' | md5
     let correct_hash = [
-        0x6cu8, 0xd3u8, 0x55u8, 0x6du8, 0xebu8, 0x0du8, 0xa5u8, 0x4bu8, 0xcau8, 0x06u8, 0x0bu8,
-        0x4cu8, 0x39u8, 0x47u8, 0x98u8, 0x39u8,
+        0x6cu8, 0xd3u8, 0x55u8, 0x6du8, 0xebu8, 0x0du8, 0xa5u8, 0x4bu8,
+        0xcau8, 0x06u8, 0x0bu8, 0x4cu8, 0x39u8, 0x47u8, 0x98u8, 0x39u8,
     ];
 
     // We have a file that is 13 bytes long, in total.
@@ -337,7 +363,9 @@ fn read_three_chunks_in_all_kinds_of_wild_and_crazy_ways() {
 
             // We read the first three bytes but then we derp
             {
-                let result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf).await;
+                let result =
+                    futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
+                        .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 3);
                 assert_eq!(&buf[..3], "Hel".as_bytes());
@@ -346,24 +374,29 @@ fn read_three_chunks_in_all_kinds_of_wild_and_crazy_ways() {
             // Derp, reset, chickens, turnips, Tallahassee, oh gosh heck I am
             // so confused
             {
-                let result = azure_core::SeekableStream::reset(&mut chunk).await;
+                let result =
+                    azure_core::SeekableStream::reset(&mut chunk).await;
                 assert!(result.is_ok());
             }
 
             // Now we read all five bytes. And just to be sure, we try
             // reading even more, and make sure we get an EOF.
             {
-                let mut result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf).await;
+                let mut result =
+                    futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
+                        .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 3);
                 assert_eq!(&buf[..3], "Hel".as_bytes());
 
-                result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf).await;
+                result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
+                    .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 2);
                 assert_eq!(&buf[..2], "lo".as_bytes());
 
-                result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf).await;
+                result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
+                    .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 0);
             }
@@ -377,7 +410,9 @@ fn read_three_chunks_in_all_kinds_of_wild_and_crazy_ways() {
 
             // We read the first three bytes but then we derp
             {
-                let result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf).await;
+                let result =
+                    futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
+                        .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 3);
                 assert_eq!(&buf[..3], ", w".as_bytes());
@@ -386,24 +421,29 @@ fn read_three_chunks_in_all_kinds_of_wild_and_crazy_ways() {
             // um why are there so many eyeballs in my salad I think I need a
             // quick nap
             {
-                let result = azure_core::SeekableStream::reset(&mut chunk).await;
+                let result =
+                    azure_core::SeekableStream::reset(&mut chunk).await;
                 assert!(result.is_ok());
             }
 
             // Now we read all five bytes. And just to be sure, we try
             // reading even more, and make sure we get an EOF.
             {
-                let mut result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf).await;
+                let mut result =
+                    futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
+                        .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 3);
                 assert_eq!(&buf[..3], ", w".as_bytes());
 
-                result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf).await;
+                result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
+                    .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 2);
                 assert_eq!(&buf[..2], "or".as_bytes());
 
-                result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf).await;
+                result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
+                    .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 0);
             }
@@ -427,12 +467,15 @@ fn read_three_chunks_in_all_kinds_of_wild_and_crazy_ways() {
             // Read all three bytes. And just to be sure, we try reading even
             // more, and make sure we get an EOF.
             {
-                let mut result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf).await;
+                let mut result =
+                    futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
+                        .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 3);
                 assert_eq!(&buf[..3], "ld!".as_bytes());
 
-                result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf).await;
+                result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
+                    .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 0);
             }

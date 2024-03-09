@@ -48,42 +48,50 @@ async fn async_main(
 }
 
 fn main() -> Result<(), wuffblob::error::WuffError> {
-    let cmdline_parser: clap::Command = wuffblob::ctx::make_cmdline_parser("wuffblob-upload")
-        .arg(
-            clap::Arg::new("paths")
-                .value_parser(clap::value_parser!(std::path::PathBuf))
-                .action(clap::ArgAction::Append),
-        )
-        .arg(
-            clap::Arg::new("upload_as")
-                .long("upload-as")
-                .value_parser(clap::value_parser!(wuffblob::path::WuffPath))
-                .action(clap::ArgAction::Set),
-        )
-        .arg(
-            clap::Arg::new("force")
-                .long("force")
-                .short('f')
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            clap::Arg::new("verify")
-                .long("verify")
-                .short('f')
-                .action(clap::ArgAction::SetTrue),
-        );
+    let cmdline_parser: clap::Command =
+        wuffblob::ctx::make_cmdline_parser("wuffblob-upload")
+            .arg(
+                clap::Arg::new("paths")
+                    .value_parser(clap::value_parser!(std::path::PathBuf))
+                    .action(clap::ArgAction::Append),
+            )
+            .arg(
+                clap::Arg::new("upload_as")
+                    .long("upload-as")
+                    .value_parser(clap::value_parser!(
+                        wuffblob::path::WuffPath
+                    ))
+                    .action(clap::ArgAction::Set),
+            )
+            .arg(
+                clap::Arg::new("force")
+                    .long("force")
+                    .short('f')
+                    .action(clap::ArgAction::SetTrue),
+            )
+            .arg(
+                clap::Arg::new("verify")
+                    .long("verify")
+                    .short('f')
+                    .action(clap::ArgAction::SetTrue),
+            );
     let cmdline_matches: clap::ArgMatches = cmdline_parser.get_matches();
 
-    let raw_to_upload: Vec<&std::path::PathBuf> =
-        if let Some(paths) = cmdline_matches.get_many::<std::path::PathBuf>("paths") {
-            Vec::from_iter(paths)
-        } else {
-            Vec::new()
-        };
+    let raw_to_upload: Vec<&std::path::PathBuf> = if let Some(paths) =
+        cmdline_matches.get_many::<std::path::PathBuf>("paths")
+    {
+        Vec::from_iter(paths)
+    } else {
+        Vec::new()
+    };
     let mut to_upload: Vec<(std::path::PathBuf, wuffblob::path::WuffPath)> =
         Vec::with_capacity(raw_to_upload.len());
-    if let Some(raw_upload_as) = cmdline_matches.get_one::<wuffblob::path::WuffPath>("upload_as") {
-        if let Some(upload_as) = raw_upload_as.clone().canonicalize_or_componentless() {
+    if let Some(raw_upload_as) =
+        cmdline_matches.get_one::<wuffblob::path::WuffPath>("upload_as")
+    {
+        if let Some(upload_as) =
+            raw_upload_as.clone().canonicalize_or_componentless()
+        {
             if raw_to_upload.is_empty() {
                 to_upload.push((".".into(), upload_as));
             } else if raw_to_upload.len() == 1 {
@@ -102,25 +110,32 @@ fn main() -> Result<(), wuffblob::error::WuffError> {
         to_upload.push((".".into(), wuffblob::path::WuffPath::new()));
     } else {
         for path in raw_to_upload {
-            if let Some(upload_as) = TryInto::<wuffblob::path::WuffPath>::try_into(path.as_path())?
-                .canonicalize_or_componentless()
+            if let Some(upload_as) =
+                TryInto::<wuffblob::path::WuffPath>::try_into(path.as_path())?
+                    .canonicalize_or_componentless()
             {
                 to_upload.push((path.clone(), upload_as));
             } else {
-                return Err(format!("{:?} is not canonicalizable (try --upload-as)", path).into());
+                return Err(format!(
+                    "{:?} is not canonicalizable (try --upload-as)",
+                    path
+                )
+                .into());
             }
         }
 
         // make sure there's no overlap
-        let mut paths: Vec<&wuffblob::path::WuffPath> = Vec::with_capacity(to_upload.len());
+        let mut paths: Vec<&wuffblob::path::WuffPath> =
+            Vec::with_capacity(to_upload.len());
         for (_, path) in &to_upload {
             paths.push(path);
         }
         wuffblob::path::WuffPath::check_for_overlap(paths)?;
     }
 
-    let ctx: std::sync::Arc<crate::ctx::Ctx> =
-        std::sync::Arc::new(crate::ctx::Ctx::new(&cmdline_matches, to_upload)?);
+    let ctx: std::sync::Arc<crate::ctx::Ctx> = std::sync::Arc::new(
+        crate::ctx::Ctx::new(&cmdline_matches, to_upload)?,
+    );
     ctx.base_ctx
         .run_async_main(async_main(std::sync::Arc::clone(&ctx)))
 }

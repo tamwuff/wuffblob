@@ -15,7 +15,9 @@ struct BoundedParallelismHelper<T> {
 
 pub struct BoundedParallelism<T> {
     parallelism: u16,
-    helper: std::sync::Arc<BoundedParallelismHelper<Result<T, crate::error::WuffError>>>,
+    helper: std::sync::Arc<
+        BoundedParallelismHelper<Result<T, crate::error::WuffError>>,
+    >,
 }
 
 impl<T: Send + 'static> BoundedParallelism<T> {
@@ -25,12 +27,14 @@ impl<T: Send + 'static> BoundedParallelism<T> {
             helper: std::sync::Arc::new(BoundedParallelismHelper::<
                 Result<T, crate::error::WuffError>,
             > {
-                inside_mutex: std::sync::Mutex::new(BoundedParallelismHelperInsideMutex::<
-                    Result<T, crate::error::WuffError>,
-                > {
-                    currently_running: 0u16,
-                    results: Vec::new(),
-                }),
+                inside_mutex: std::sync::Mutex::new(
+                    BoundedParallelismHelperInsideMutex::<
+                        Result<T, crate::error::WuffError>,
+                    > {
+                        currently_running: 0u16,
+                        results: Vec::new(),
+                    },
+                ),
                 cv: tokio::sync::Notify::new(),
             }),
         }
@@ -47,18 +51,25 @@ impl<T: Send + 'static> BoundedParallelism<T> {
         let mut results: Vec<Result<T, crate::error::WuffError>> = Vec::new();
         loop {
             {
-                let mut inside_mutex = self.helper.inside_mutex.lock().expect("BoundedParallelism");
+                let mut inside_mutex = self
+                    .helper
+                    .inside_mutex
+                    .lock()
+                    .expect("BoundedParallelism");
                 if inside_mutex.currently_running < self.parallelism {
                     inside_mutex.currently_running += 1;
 
-                    let task: tokio::task::JoinHandle<T> = ctx.get_async_spawner().spawn(f);
+                    let task: tokio::task::JoinHandle<T> =
+                        ctx.get_async_spawner().spawn(f);
 
                     let fut = {
                         let helper = std::sync::Arc::clone(&self.helper);
                         async move {
                             let result = task.await;
-                            let mut inside_for_watcher =
-                                helper.inside_mutex.lock().expect("BoundedParallelism");
+                            let mut inside_for_watcher = helper
+                                .inside_mutex
+                                .lock()
+                                .expect("BoundedParallelism");
                             inside_for_watcher.currently_running -= 1;
                             inside_for_watcher.results.push(match result {
                                 Ok(x) => Ok(x),
@@ -82,7 +93,11 @@ impl<T: Send + 'static> BoundedParallelism<T> {
         let mut results: Vec<Result<T, crate::error::WuffError>> = Vec::new();
         loop {
             {
-                let mut inside_mutex = self.helper.inside_mutex.lock().expect("BoundedParallelism");
+                let mut inside_mutex = self
+                    .helper
+                    .inside_mutex
+                    .lock()
+                    .expect("BoundedParallelism");
                 if inside_mutex.currently_running == 0u16 {
                     std::mem::swap(&mut results, &mut inside_mutex.results);
                     break;
@@ -97,7 +112,8 @@ impl<T: Send + 'static> BoundedParallelism<T> {
 // Hex stuff... is there really nothing built in for this??
 
 static HEX_DIGITS: [char; 16] = [
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e',
+    'f',
 ];
 pub fn hex_encode(buf: &[u8]) -> String {
     let mut s: String = String::with_capacity(buf.len() * 2);
@@ -113,7 +129,9 @@ pub fn hex_encode(buf: &[u8]) -> String {
 // only way to get one is to actually create real temporary files/directories.
 // Which is the same thing we need to do to make a File object for unit
 // testing, too.
-fn make_temp_file_or_dir(contents: Option<&[u8]>) -> (std::fs::Metadata, Option<std::fs::File>) {
+fn make_temp_file_or_dir(
+    contents: Option<&[u8]>,
+) -> (std::fs::Metadata, Option<std::fs::File>) {
     let mut rng: rand::rngs::ThreadRng = rand::thread_rng();
     let mut uuid_buf: [u8; 16] = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rng, &mut uuid_buf);
@@ -132,7 +150,8 @@ fn make_temp_file_or_dir(contents: Option<&[u8]>) -> (std::fs::Metadata, Option<
         file_name.push(&uuid_str);
         let file_name_for_panic: String = format!("{:?}", &file_name);
         std::io::Write::write_all(
-            &mut (std::fs::File::create(&file_name).expect(&file_name_for_panic)),
+            &mut (std::fs::File::create(&file_name)
+                .expect(&file_name_for_panic)),
             buf,
         )
         .expect(&file_name_for_panic);
@@ -176,9 +195,11 @@ pub fn temp_local_file(contents: &str) -> std::fs::File {
 // The fields given here were reverse engineered by starting with "{}" and
 // every time it barfed because of a missing field, I added only that one
 // field.
-fn minimal_fake_blob_properties() -> azure_storage_blobs::blob::BlobProperties {
+fn minimal_fake_blob_properties() -> azure_storage_blobs::blob::BlobProperties
+{
     let s: &str = "{\"Creation-Time\": \"Mon, 01 Jan 1970 00:00:00 GMT\", \"Last-Modified\": \"Mon, 01 Jan 1970 00:00:00 GMT\", \"Etag\": \"\", \"Content-Length\": 0, \"Content-Type\": \"\", \"BlobType\": \"BlockBlob\"}";
-    serde_json::from_str::<azure_storage_blobs::blob::BlobProperties>(s).expect(s)
+    serde_json::from_str::<azure_storage_blobs::blob::BlobProperties>(s)
+        .expect(s)
 }
 
 // for unit tests
@@ -195,10 +216,9 @@ pub fn fake_blob_properties_file(
     blob_properties.content_length = content_length;
     if let Some(buf) = hash {
         blob_properties.content_md5 = Some(
-            azure_storage::prelude::ConsistencyMD5::decode(base64::Engine::encode(
-                &base64::prelude::BASE64_STANDARD,
-                buf,
-            ))
+            azure_storage::prelude::ConsistencyMD5::decode(
+                base64::Engine::encode(&base64::prelude::BASE64_STANDARD, buf),
+            )
             .unwrap(),
         );
     }
@@ -207,7 +227,8 @@ pub fn fake_blob_properties_file(
 
 // for unit tests
 #[allow(dead_code)]
-pub fn fake_blob_properties_directory() -> azure_storage_blobs::blob::BlobProperties {
+pub fn fake_blob_properties_directory(
+) -> azure_storage_blobs::blob::BlobProperties {
     let mut blob_properties: azure_storage_blobs::blob::BlobProperties =
         minimal_fake_blob_properties();
     blob_properties.resource_type = Some("directory".to_string());
@@ -247,7 +268,8 @@ fn make_temp_local_file() {
     let mut f = temp_local_file("Hello, world!");
 
     assert_eq!(std::io::Seek::stream_position(&mut f).unwrap(), 0);
-    std::io::Read::read_exact(&mut f, &mut buf).expect("wrong number of bytes");
+    std::io::Read::read_exact(&mut f, &mut buf)
+        .expect("wrong number of bytes");
 
     assert_eq!(std::io::Seek::stream_position(&mut f).unwrap(), 13);
     assert_eq!(

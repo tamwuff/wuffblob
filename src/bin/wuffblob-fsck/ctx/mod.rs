@@ -45,9 +45,13 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    pub fn new(cmdline_matches: &clap::ArgMatches) -> Result<Ctx, wuffblob::error::WuffError> {
+    pub fn new(
+        cmdline_matches: &clap::ArgMatches,
+    ) -> Result<Ctx, wuffblob::error::WuffError> {
         Ok(Ctx {
-            base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new(&cmdline_matches)?),
+            base_ctx: std::sync::Arc::new(wuffblob::ctx::Ctx::new(
+                &cmdline_matches,
+            )?),
             preen: *(cmdline_matches.get_one::<bool>("preen").unwrap()),
             yes: *(cmdline_matches.get_one::<bool>("yes").unwrap()),
             stats: std::sync::Mutex::new(crate::ctx::Stats::new()),

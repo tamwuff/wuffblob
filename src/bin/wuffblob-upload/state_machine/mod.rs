@@ -82,7 +82,10 @@ impl Uploader {
         self.set_state_to_remote_error(err);
     }
 
-    pub fn there_is_no_remote_metadata(&mut self, ctx: &std::sync::Arc<crate::ctx::Ctx>) {
+    pub fn there_is_no_remote_metadata(
+        &mut self,
+        ctx: &std::sync::Arc<crate::ctx::Ctx>,
+    ) {
         if !matches!(self.state, UploaderState::GetRemoteMetadata) {
             panic!(
                 "State is {:?}, expected UploaderState::GetRemoteMetadata",
@@ -124,8 +127,12 @@ impl Uploader {
                 self.set_state_to_remote_error("is directory, not file");
             } else {
                 if remote_metadata.content_md5.is_none() {
-                    self.set_state_to_remote_error("no hash, please run wuffblob-fsck");
-                } else if remote_metadata.content_length == self.local_metadata.len() {
+                    self.set_state_to_remote_error(
+                        "no hash, please run wuffblob-fsck",
+                    );
+                } else if remote_metadata.content_length
+                    == self.local_metadata.len()
+                {
                     self.state = UploaderState::Hash;
                 } else if ctx.force {
                     self.state = UploaderState::Upload(true);
@@ -158,7 +165,11 @@ impl Uploader {
         self.set_state_to_local_error(err);
     }
 
-    pub fn provide_hash(&mut self, ctx: &std::sync::Arc<crate::ctx::Ctx>, empirical_md5: [u8; 16]) {
+    pub fn provide_hash(
+        &mut self,
+        ctx: &std::sync::Arc<crate::ctx::Ctx>,
+        empirical_md5: [u8; 16],
+    ) {
         if !matches!(self.state, UploaderState::Hash) {
             panic!("State is {:?}, expected UploaderState::Hash", &self.state);
         }
@@ -187,7 +198,10 @@ impl Uploader {
         err: &wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, UploaderState::Mkdir) {
-            panic!("State is {:?}, expected UploaderState::Mkdir", &self.state);
+            panic!(
+                "State is {:?}, expected UploaderState::Mkdir",
+                &self.state
+            );
         }
 
         self.set_state_to_remote_error(err);
@@ -195,7 +209,10 @@ impl Uploader {
 
     pub fn mkdir_succeeded(&mut self, ctx: &std::sync::Arc<crate::ctx::Ctx>) {
         if !matches!(self.state, UploaderState::Mkdir) {
-            panic!("State is {:?}, expected UploaderState::Mkdir", &self.state);
+            panic!(
+                "State is {:?}, expected UploaderState::Mkdir",
+                &self.state
+            );
         }
 
         self.state = UploaderState::Ok;
@@ -207,7 +224,10 @@ impl Uploader {
         err: &wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, UploaderState::Upload(_)) {
-            panic!("State is {:?}, expected UploaderState::Upload", &self.state);
+            panic!(
+                "State is {:?}, expected UploaderState::Upload",
+                &self.state
+            );
         }
 
         self.set_state_to_remote_error(err);
@@ -215,7 +235,10 @@ impl Uploader {
 
     pub fn upload_succeeded(&mut self, ctx: &std::sync::Arc<crate::ctx::Ctx>) {
         if !matches!(self.state, UploaderState::Upload(_)) {
-            panic!("State is {:?}, expected UploaderState::Upload", &self.state);
+            panic!(
+                "State is {:?}, expected UploaderState::Upload",
+                &self.state
+            );
         }
 
         self.state = if ctx.verify {
@@ -231,7 +254,10 @@ impl Uploader {
         err: &wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, UploaderState::Verify) {
-            panic!("State is {:?}, expected UploaderState::Verify", &self.state);
+            panic!(
+                "State is {:?}, expected UploaderState::Verify",
+                &self.state
+            );
         }
 
         self.set_state_to_remote_error(err);
@@ -239,7 +265,10 @@ impl Uploader {
 
     pub fn verify_succeeded(&mut self, ctx: &std::sync::Arc<crate::ctx::Ctx>) {
         if !matches!(self.state, UploaderState::Verify) {
-            panic!("State is {:?}, expected UploaderState::Verify", &self.state);
+            panic!(
+                "State is {:?}, expected UploaderState::Verify",
+                &self.state
+            );
         }
 
         self.state = UploaderState::Ok;
@@ -249,14 +278,16 @@ impl Uploader {
     where
         T: std::fmt::Display,
     {
-        self.state = UploaderState::Error(format!("{:?}: {}", &self.local_path, err));
+        self.state =
+            UploaderState::Error(format!("{:?}: {}", &self.local_path, err));
     }
 
     fn set_state_to_remote_error<T>(&mut self, err: T)
     where
         T: std::fmt::Display,
     {
-        self.state = UploaderState::Error(format!("{}: {}", &self.remote_path, err));
+        self.state =
+            UploaderState::Error(format!("{}: {}", &self.remote_path, err));
     }
 }
 
@@ -309,7 +340,10 @@ fn dir_goes_to_error_if_get_metadata_fails() {
         &uploader.state
     );
 
-    uploader.get_remote_metadata_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    uploader.get_remote_metadata_failed(
+        &ctx,
+        &wuffblob::error::WuffError::from("squeeeee"),
+    );
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
         "State: {:?}",
@@ -332,7 +366,10 @@ fn file_goes_to_error_if_get_metadata_fails() {
         &uploader.state
     );
 
-    uploader.get_remote_metadata_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    uploader.get_remote_metadata_failed(
+        &ctx,
+        &wuffblob::error::WuffError::from("squeeeee"),
+    );
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
         "State: {:?}",
@@ -403,7 +440,11 @@ fn dir_goes_to_error_if_remote_metadata_indicates_file() {
 
     uploader.provide_remote_metadata(
         &ctx,
-        wuffblob::util::fake_blob_properties_file("text/plain", 42, Some(&[23u8; 16])),
+        wuffblob::util::fake_blob_properties_file(
+            "text/plain",
+            42,
+            Some(&[23u8; 16]),
+        ),
     );
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
@@ -427,7 +468,10 @@ fn file_goes_to_error_if_remote_metadata_indicates_dir() {
         &uploader.state
     );
 
-    uploader.provide_remote_metadata(&ctx, wuffblob::util::fake_blob_properties_directory());
+    uploader.provide_remote_metadata(
+        &ctx,
+        wuffblob::util::fake_blob_properties_directory(),
+    );
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
         "State: {:?}",
@@ -450,7 +494,10 @@ fn dir_goes_to_ok_if_already_exists() {
         &uploader.state
     );
 
-    uploader.provide_remote_metadata(&ctx, wuffblob::util::fake_blob_properties_directory());
+    uploader.provide_remote_metadata(
+        &ctx,
+        wuffblob::util::fake_blob_properties_directory(),
+    );
     assert!(
         matches!(uploader.state, UploaderState::Ok),
         "State: {:?}",
@@ -460,7 +507,8 @@ fn dir_goes_to_ok_if_already_exists() {
 
 #[test]
 fn file_goes_to_error_if_remote_metadata_indicates_wrong_size_and_not_force() {
-    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    let mut ctx =
+        std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
     std::sync::Arc::get_mut(&mut ctx).unwrap().force = false;
     let mut uploader = Uploader::new(
         &ctx,
@@ -476,7 +524,11 @@ fn file_goes_to_error_if_remote_metadata_indicates_wrong_size_and_not_force() {
 
     uploader.provide_remote_metadata(
         &ctx,
-        wuffblob::util::fake_blob_properties_file("text/plain", 42, Some(&[23u8; 16])),
+        wuffblob::util::fake_blob_properties_file(
+            "text/plain",
+            42,
+            Some(&[23u8; 16]),
+        ),
     );
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
@@ -487,7 +539,8 @@ fn file_goes_to_error_if_remote_metadata_indicates_wrong_size_and_not_force() {
 
 #[test]
 fn file_goes_to_upload_if_remote_metadata_indicates_wrong_size_and_force() {
-    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    let mut ctx =
+        std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
     std::sync::Arc::get_mut(&mut ctx).unwrap().force = true;
     let mut uploader = Uploader::new(
         &ctx,
@@ -503,7 +556,11 @@ fn file_goes_to_upload_if_remote_metadata_indicates_wrong_size_and_force() {
 
     uploader.provide_remote_metadata(
         &ctx,
-        wuffblob::util::fake_blob_properties_file("text/plain", 42, Some(&[23u8; 16])),
+        wuffblob::util::fake_blob_properties_file(
+            "text/plain",
+            42,
+            Some(&[23u8; 16]),
+        ),
     );
     assert!(
         matches!(uploader.state, UploaderState::Upload(true)),
@@ -529,7 +586,11 @@ fn file_goes_to_hash_if_remote_metadata_indicates_correct_size() {
 
     uploader.provide_remote_metadata(
         &ctx,
-        wuffblob::util::fake_blob_properties_file("text/plain", 23, Some(&[23u8; 16])),
+        wuffblob::util::fake_blob_properties_file(
+            "text/plain",
+            23,
+            Some(&[23u8; 16]),
+        ),
     );
     assert!(
         matches!(uploader.state, UploaderState::Hash),
@@ -554,7 +615,11 @@ fn file_goes_to_error_if_local_hashing_fails() {
     );
     uploader.provide_remote_metadata(
         &ctx,
-        wuffblob::util::fake_blob_properties_file("text/plain", 23, Some(&[23u8; 16])),
+        wuffblob::util::fake_blob_properties_file(
+            "text/plain",
+            23,
+            Some(&[23u8; 16]),
+        ),
     );
     assert!(
         matches!(uploader.state, UploaderState::Hash),
@@ -572,7 +637,8 @@ fn file_goes_to_error_if_local_hashing_fails() {
 
 #[test]
 fn file_goes_to_error_if_hash_is_wrong_and_not_force() {
-    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    let mut ctx =
+        std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
     std::sync::Arc::get_mut(&mut ctx).unwrap().force = false;
     let incorrect_hash = [23u8; 16];
     let correct_hash = [42u8; 16];
@@ -589,7 +655,11 @@ fn file_goes_to_error_if_hash_is_wrong_and_not_force() {
     );
     uploader.provide_remote_metadata(
         &ctx,
-        wuffblob::util::fake_blob_properties_file("text/plain", 23, Some(&incorrect_hash)),
+        wuffblob::util::fake_blob_properties_file(
+            "text/plain",
+            23,
+            Some(&incorrect_hash),
+        ),
     );
     assert!(
         matches!(uploader.state, UploaderState::Hash),
@@ -607,7 +677,8 @@ fn file_goes_to_error_if_hash_is_wrong_and_not_force() {
 
 #[test]
 fn file_goes_to_upload_if_hash_is_wrong_and_force() {
-    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    let mut ctx =
+        std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
     std::sync::Arc::get_mut(&mut ctx).unwrap().force = true;
     let incorrect_hash = [23u8; 16];
     let correct_hash = [42u8; 16];
@@ -624,7 +695,11 @@ fn file_goes_to_upload_if_hash_is_wrong_and_force() {
     );
     uploader.provide_remote_metadata(
         &ctx,
-        wuffblob::util::fake_blob_properties_file("text/plain", 23, Some(&incorrect_hash)),
+        wuffblob::util::fake_blob_properties_file(
+            "text/plain",
+            23,
+            Some(&incorrect_hash),
+        ),
     );
     assert!(
         matches!(uploader.state, UploaderState::Hash),
@@ -719,7 +794,8 @@ fn file_goes_to_error_if_upload_fails() {
         &uploader.state
     );
 
-    uploader.upload_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    uploader
+        .upload_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
         "State: {:?}",
@@ -729,7 +805,8 @@ fn file_goes_to_error_if_upload_fails() {
 
 #[test]
 fn file_goes_to_ok_if_upload_succeeds_and_not_verify() {
-    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    let mut ctx =
+        std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
     std::sync::Arc::get_mut(&mut ctx).unwrap().verify = false;
     let mut uploader = Uploader::new(
         &ctx,
@@ -759,7 +836,8 @@ fn file_goes_to_ok_if_upload_succeeds_and_not_verify() {
 
 #[test]
 fn file_goes_to_verify_if_upload_succeeds_and_verify() {
-    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    let mut ctx =
+        std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
     std::sync::Arc::get_mut(&mut ctx).unwrap().verify = true;
     let mut uploader = Uploader::new(
         &ctx,
@@ -789,7 +867,8 @@ fn file_goes_to_verify_if_upload_succeeds_and_verify() {
 
 #[test]
 fn file_goes_to_error_if_verify_fails() {
-    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    let mut ctx =
+        std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
     std::sync::Arc::get_mut(&mut ctx).unwrap().verify = true;
     let mut uploader = Uploader::new(
         &ctx,
@@ -815,7 +894,8 @@ fn file_goes_to_error_if_verify_fails() {
         &uploader.state
     );
 
-    uploader.verify_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    uploader
+        .verify_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
         "State: {:?}",
@@ -825,7 +905,8 @@ fn file_goes_to_error_if_verify_fails() {
 
 #[test]
 fn file_goes_to_ok_if_verify_succeeds() {
-    let mut ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    let mut ctx =
+        std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
     std::sync::Arc::get_mut(&mut ctx).unwrap().verify = true;
     let mut uploader = Uploader::new(
         &ctx,

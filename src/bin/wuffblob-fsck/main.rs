@@ -89,7 +89,8 @@ async fn do_hash(
         );
         ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
             stats.hash_required -= 1u64;
-            stats.hash_bytes_required -= file_checker.properties.content_length;
+            stats.hash_bytes_required -=
+                file_checker.properties.content_length;
         });
         return;
     }
@@ -105,36 +106,51 @@ async fn do_hash(
     // We desperately do not want to move anything here, because moves
     // mean copying. We borrow even when it would seem to be in our best
     // interest to consume...!
-    while let Some(ref mut maybe_chunk) = futures::stream::StreamExt::next(&mut chunks_stream).await
+    while let Some(ref mut maybe_chunk) =
+        futures::stream::StreamExt::next(&mut chunks_stream).await
     {
         match maybe_chunk {
             Ok(ref mut chunk) => {
                 let chunk_stream = &mut chunk.data;
-                while let Some(ref maybe_buf) = futures::stream::StreamExt::next(chunk_stream).await
+                while let Some(ref maybe_buf) =
+                    futures::stream::StreamExt::next(chunk_stream).await
                 {
                     match maybe_buf {
                         Ok(ref buf) => {
                             let buf_len: usize = buf.len();
-                            <md5::Md5 as md5::Digest>::update(&mut hasher, buf);
+                            <md5::Md5 as md5::Digest>::update(
+                                &mut hasher,
+                                buf,
+                            );
                             num_bytes_hashed += buf_len as u64;
-                            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
-                                stats.hash_bytes_complete += buf_len as u64;
-                            });
+                            ctx.mutate_stats(
+                                |stats: &mut crate::ctx::Stats| {
+                                    stats.hash_bytes_complete +=
+                                        buf_len as u64;
+                                },
+                            );
                         }
                         Err(err) => {
-                            file_checker.hash_failed(ctx, &wuffblob::error::WuffError::from(err));
-                            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
-                                stats.hash_bytes_complete -= num_bytes_hashed;
-                                stats.hash_required -= 1u64;
-                                stats.hash_bytes_required -= expected_len;
-                            });
+                            file_checker.hash_failed(
+                                ctx,
+                                &wuffblob::error::WuffError::from(err),
+                            );
+                            ctx.mutate_stats(
+                                |stats: &mut crate::ctx::Stats| {
+                                    stats.hash_bytes_complete -=
+                                        num_bytes_hashed;
+                                    stats.hash_required -= 1u64;
+                                    stats.hash_bytes_required -= expected_len;
+                                },
+                            );
                             return;
                         }
                     }
                 }
             }
             Err(ref err) => {
-                file_checker.hash_failed(ctx, &wuffblob::error::WuffError::from(err));
+                file_checker
+                    .hash_failed(ctx, &wuffblob::error::WuffError::from(err));
                 ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
                     stats.hash_bytes_complete -= num_bytes_hashed;
                     stats.hash_required -= 1u64;
@@ -173,14 +189,20 @@ async fn do_hash(
 
 async fn hasher(
     ctx: std::sync::Arc<crate::ctx::Ctx>,
-    mut hasher_reader: tokio::sync::mpsc::Receiver<Box<crate::state_machine::FileChecker>>,
-    ui_writer: tokio::sync::mpsc::Sender<Option<Box<crate::state_machine::FileChecker>>>,
+    mut hasher_reader: tokio::sync::mpsc::Receiver<
+        Box<crate::state_machine::FileChecker>,
+    >,
+    ui_writer: tokio::sync::mpsc::Sender<
+        Option<Box<crate::state_machine::FileChecker>>,
+    >,
 ) -> Result<(), wuffblob::error::WuffError> {
     let conc_mgr = ctx
         .base_ctx
         .data_concurrency_mgr::<Box<crate::state_machine::FileChecker>>();
     while let Some(mut file_checker) = hasher_reader.recv().await {
-        if let crate::state_machine::FileCheckerState::Hash = file_checker.state {
+        if let crate::state_machine::FileCheckerState::Hash =
+            file_checker.state
+        {
         } else {
             return Err(format!(
                 "State is {:?}, expected FileCheckerState::Hash",
@@ -189,18 +211,21 @@ async fn hasher(
             .into());
         }
         let fut = {
-            let ctx: std::sync::Arc<crate::ctx::Ctx> = std::sync::Arc::clone(&ctx);
+            let ctx: std::sync::Arc<crate::ctx::Ctx> =
+                std::sync::Arc::clone(&ctx);
             async move {
                 do_hash(&ctx, file_checker.as_mut()).await;
                 file_checker
             }
         };
         for maybe_file_checker in conc_mgr.spawn(&ctx.base_ctx, fut).await {
-            let file_checker: Box<crate::state_machine::FileChecker> = maybe_file_checker?;
+            let file_checker: Box<crate::state_machine::FileChecker> =
+                maybe_file_checker?;
             match file_checker.state {
                 crate::state_machine::FileCheckerState::Terminal => {}
                 crate::state_machine::FileCheckerState::Message(_)
-                | crate::state_machine::FileCheckerState::UserInteraction(_) => {
+                | crate::state_machine::FileCheckerState::UserInteraction(_) =>
+                {
                     ui_writer.send(Some(file_checker)).await?;
                 }
 
@@ -215,7 +240,8 @@ async fn hasher(
         }
     }
     for maybe_file_checker in conc_mgr.drain().await {
-        let file_checker: Box<crate::state_machine::FileChecker> = maybe_file_checker?;
+        let file_checker: Box<crate::state_machine::FileChecker> =
+            maybe_file_checker?;
         match file_checker.state {
             crate::state_machine::FileCheckerState::Terminal => {}
             crate::state_machine::FileCheckerState::Message(_)
@@ -242,8 +268,12 @@ async fn hasher(
 // plain Messages.
 fn ui(
     ctx: std::sync::Arc<crate::ctx::Ctx>,
-    mut ui_reader: tokio::sync::mpsc::Receiver<Option<Box<crate::state_machine::FileChecker>>>,
-    propupd_writer: tokio::sync::mpsc::Sender<Box<crate::state_machine::FileChecker>>,
+    mut ui_reader: tokio::sync::mpsc::Receiver<
+        Option<Box<crate::state_machine::FileChecker>>,
+    >,
+    propupd_writer: tokio::sync::mpsc::Sender<
+        Box<crate::state_machine::FileChecker>,
+    >,
 ) {
     // Turn our properties-update writer into an Option so that we can drop
     // it when we need to
@@ -323,7 +353,9 @@ async fn do_update_properties(
     ctx: &std::sync::Arc<crate::ctx::Ctx>,
     file_checker: &mut crate::state_machine::FileChecker,
 ) {
-    if let crate::state_machine::FileCheckerState::UpdateProperties = file_checker.state {
+    if let crate::state_machine::FileCheckerState::UpdateProperties =
+        file_checker.state
+    {
     } else {
         panic!(
             "State is {:?}, expected FileCheckerState::UpdateProperties",
@@ -364,7 +396,10 @@ async fn do_update_properties(
             });
         }
         Err(err) => {
-            file_checker.update_properties_failed(ctx, &wuffblob::error::WuffError::from(err));
+            file_checker.update_properties_failed(
+                ctx,
+                &wuffblob::error::WuffError::from(err),
+            );
             ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
                 stats.propupd_required -= 1;
             });
@@ -374,14 +409,20 @@ async fn do_update_properties(
 
 async fn properties_updater(
     ctx: std::sync::Arc<crate::ctx::Ctx>,
-    mut propupd_reader: tokio::sync::mpsc::Receiver<Box<crate::state_machine::FileChecker>>,
-    ui_writer: tokio::sync::mpsc::Sender<Option<Box<crate::state_machine::FileChecker>>>,
+    mut propupd_reader: tokio::sync::mpsc::Receiver<
+        Box<crate::state_machine::FileChecker>,
+    >,
+    ui_writer: tokio::sync::mpsc::Sender<
+        Option<Box<crate::state_machine::FileChecker>>,
+    >,
 ) -> Result<(), wuffblob::error::WuffError> {
     let conc_mgr = ctx
         .base_ctx
         .metadata_concurrency_mgr::<Box<crate::state_machine::FileChecker>>();
     while let Some(mut file_checker) = propupd_reader.recv().await {
-        if let crate::state_machine::FileCheckerState::UpdateProperties = file_checker.state {
+        if let crate::state_machine::FileCheckerState::UpdateProperties =
+            file_checker.state
+        {
         } else {
             return Err(format!(
                 "State is {:?}, expected FileCheckerState::UpdateProperties",
@@ -391,14 +432,16 @@ async fn properties_updater(
         }
 
         let fut = {
-            let ctx: std::sync::Arc<crate::ctx::Ctx> = std::sync::Arc::clone(&ctx);
+            let ctx: std::sync::Arc<crate::ctx::Ctx> =
+                std::sync::Arc::clone(&ctx);
             async move {
                 do_update_properties(&ctx, file_checker.as_mut()).await;
                 file_checker
             }
         };
         for maybe_file_checker in conc_mgr.spawn(&ctx.base_ctx, fut).await {
-            let file_checker: Box<crate::state_machine::FileChecker> = maybe_file_checker?;
+            let file_checker: Box<crate::state_machine::FileChecker> =
+                maybe_file_checker?;
             match file_checker.state {
                 crate::state_machine::FileCheckerState::Terminal => {}
 
@@ -417,7 +460,8 @@ async fn properties_updater(
         }
     }
     for maybe_file_checker in conc_mgr.drain().await {
-        let file_checker: Box<crate::state_machine::FileChecker> = maybe_file_checker?;
+        let file_checker: Box<crate::state_machine::FileChecker> =
+            maybe_file_checker?;
         match file_checker.state {
             crate::state_machine::FileCheckerState::Terminal => {}
 
@@ -447,31 +491,38 @@ async fn async_main(
         }
     })?;
 
-    let (ui_writer, ui_reader) =
-        tokio::sync::mpsc::channel::<Option<Box<crate::state_machine::FileChecker>>>(1000usize);
-    let (hasher_writer, hasher_reader) =
-        tokio::sync::mpsc::channel::<Box<crate::state_machine::FileChecker>>(1000usize);
-    let (propupd_writer, propupd_reader) =
-        tokio::sync::mpsc::channel::<Box<crate::state_machine::FileChecker>>(1000usize);
+    let (ui_writer, ui_reader) = tokio::sync::mpsc::channel::<
+        Option<Box<crate::state_machine::FileChecker>>,
+    >(1000usize);
+    let (hasher_writer, hasher_reader) = tokio::sync::mpsc::channel::<
+        Box<crate::state_machine::FileChecker>,
+    >(1000usize);
+    let (propupd_writer, propupd_reader) = tokio::sync::mpsc::channel::<
+        Box<crate::state_machine::FileChecker>,
+    >(1000usize);
 
-    let ui_thread: tokio::task::JoinHandle<()> = ctx.base_ctx.get_async_spawner().spawn_blocking({
-        let ctx: std::sync::Arc<crate::ctx::Ctx> = std::sync::Arc::clone(&ctx);
-        move || {
-            ui(ctx, ui_reader, propupd_writer);
-        }
-    });
-    let hasher_task: tokio::task::JoinHandle<Result<(), wuffblob::error::WuffError>> =
-        ctx.base_ctx.get_async_spawner().spawn(hasher(
-            std::sync::Arc::clone(&ctx),
-            hasher_reader,
-            ui_writer.clone(),
-        ));
-    let propupd_task: tokio::task::JoinHandle<Result<(), wuffblob::error::WuffError>> =
-        ctx.base_ctx.get_async_spawner().spawn(properties_updater(
-            std::sync::Arc::clone(&ctx),
-            propupd_reader,
-            ui_writer.clone(),
-        ));
+    let ui_thread: tokio::task::JoinHandle<()> =
+        ctx.base_ctx.get_async_spawner().spawn_blocking({
+            let ctx: std::sync::Arc<crate::ctx::Ctx> =
+                std::sync::Arc::clone(&ctx);
+            move || {
+                ui(ctx, ui_reader, propupd_writer);
+            }
+        });
+    let hasher_task: tokio::task::JoinHandle<
+        Result<(), wuffblob::error::WuffError>,
+    > = ctx.base_ctx.get_async_spawner().spawn(hasher(
+        std::sync::Arc::clone(&ctx),
+        hasher_reader,
+        ui_writer.clone(),
+    ));
+    let propupd_task: tokio::task::JoinHandle<
+        Result<(), wuffblob::error::WuffError>,
+    > = ctx.base_ctx.get_async_spawner().spawn(properties_updater(
+        std::sync::Arc::clone(&ctx),
+        propupd_reader,
+        ui_writer.clone(),
+    ));
 
     let mut contents = ctx
         .base_ctx
@@ -479,7 +530,9 @@ async fn async_main(
         .container_client
         .list_blobs()
         .into_stream();
-    while let Some(possible_chunk) = futures::stream::StreamExt::next(&mut contents).await {
+    while let Some(possible_chunk) =
+        futures::stream::StreamExt::next(&mut contents).await
+    {
         // We want to consume 'possible_chunk'. Normally we would be very
         // careful when iterating, *not* to consume what we are iterating
         // over. Here we are equally careful *to* consume it.
@@ -489,9 +542,13 @@ async fn async_main(
         // chunk.blobs.blobs() is a nice convenience function but it only
         // returns refs... we want to consume...
         for blob_item in chunk.blobs.items {
-            if let azure_storage_blobs::container::operations::BlobItem::Blob(blob) = blob_item {
+            if let azure_storage_blobs::container::operations::BlobItem::Blob(
+                blob,
+            ) = blob_item
+            {
                 let mut is_dir: bool = false;
-                if let Some(ref resource_type) = blob.properties.resource_type {
+                if let Some(ref resource_type) = blob.properties.resource_type
+                {
                     if resource_type == "directory" {
                         is_dir = true;
                     }
@@ -512,7 +569,9 @@ async fn async_main(
                 let file_checker: Box<crate::state_machine::FileChecker> =
                     Box::new(crate::state_machine::FileChecker::new(
                         &ctx,
-                        wuffblob::path::WuffPath::from_osstr(std::ffi::OsStr::new(&blob.name)),
+                        wuffblob::path::WuffPath::from_osstr(
+                            std::ffi::OsStr::new(&blob.name),
+                        ),
                         is_dir,
                         blob.properties,
                     ));
@@ -521,7 +580,9 @@ async fn async_main(
                     crate::state_machine::FileCheckerState::Terminal => {}
 
                     crate::state_machine::FileCheckerState::Message(_)
-                    | crate::state_machine::FileCheckerState::UserInteraction(_) => {
+                    | crate::state_machine::FileCheckerState::UserInteraction(
+                        _,
+                    ) => {
                         ui_writer.send(Some(file_checker)).await?;
                     }
 
@@ -571,19 +632,20 @@ async fn async_main(
 }
 
 fn main() -> Result<(), wuffblob::error::WuffError> {
-    let cmdline_parser: clap::Command = wuffblob::ctx::make_cmdline_parser("wuffblob-fsck")
-        .arg(
-            clap::Arg::new("preen")
-                .long("preen")
-                .short('p')
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            clap::Arg::new("yes")
-                .long("yes")
-                .short('y')
-                .action(clap::ArgAction::SetTrue),
-        );
+    let cmdline_parser: clap::Command =
+        wuffblob::ctx::make_cmdline_parser("wuffblob-fsck")
+            .arg(
+                clap::Arg::new("preen")
+                    .long("preen")
+                    .short('p')
+                    .action(clap::ArgAction::SetTrue),
+            )
+            .arg(
+                clap::Arg::new("yes")
+                    .long("yes")
+                    .short('y')
+                    .action(clap::ArgAction::SetTrue),
+            );
     let cmdline_matches: clap::ArgMatches = cmdline_parser.get_matches();
 
     let ctx: std::sync::Arc<crate::ctx::Ctx> =
