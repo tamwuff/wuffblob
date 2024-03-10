@@ -1,3 +1,5 @@
+mod default_blksize_finder;
+
 #[derive(Debug)]
 pub struct AzureClient {
     pub container_client: azure_storage_blobs::prelude::ContainerClient,
@@ -279,12 +281,20 @@ impl FileForUpload {
 
     #[cfg(unix)]
     fn calc_blksize(mut blksize: usize) -> usize {
-        // azure_core::SeekableStream::DEFAULT_BUFFER_SIZE is private, but at
-        // the time of this writing, it was 65536
-        const DEFAULT_BUFFER_SIZE: usize = 65536;
+        // The local filesystem has already told us what its preference is,
+        // about how many bytes at a time we should read.
+        //
+        // But the Azure library probably comes with a pretty good default too,
+        // which takes into account the fact that we don't want to spin around
+        // really fast refilling our socket buffers over and over again.
+        //
+        // So we take what the OS gave us, and we keep doubling it, until it is
+        // at least as big as what the Azure library would have defaulted to.
+
+        let min_blksize: usize = crate::azure::default_blksize_finder::get_azure_seekable_stream_default_buffer_size();
 
         assert!(blksize > 0);
-        while blksize < DEFAULT_BUFFER_SIZE {
+        while blksize < min_blksize {
             blksize *= 2;
         }
         blksize

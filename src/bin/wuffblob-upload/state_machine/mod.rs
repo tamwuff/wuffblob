@@ -38,7 +38,7 @@ pub struct Uploader {
 }
 
 impl Uploader {
-    fn new(
+    pub fn new(
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         local_path: std::path::PathBuf,
         remote_path: wuffblob::path::WuffPath,
