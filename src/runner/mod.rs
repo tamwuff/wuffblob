@@ -143,6 +143,7 @@ impl<T> RunnerInsideMutex<T> {
 
 pub struct Runner<T> {
     inside_mutex: std::sync::Arc<std::sync::RwLock<RunnerInsideMutex<T>>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl<T: Send + 'static> Runner<T> {
@@ -160,11 +161,12 @@ impl<T: Send + 'static> Runner<T> {
                     in_flight: 0,
                 },
             )),
+            tasks: Vec::new(),
         }
     }
 
     pub fn handle_terminal<P, H>(
-        &self,
+        &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         pred: P,
         mut handler: H,
@@ -175,7 +177,8 @@ impl<T: Send + 'static> Runner<T> {
         let pred: std::sync::Arc<dyn Fn(&T) -> bool + Send + Sync> =
             std::sync::Arc::new(pred);
         let (writer, mut reader) = tokio::sync::mpsc::channel::<Box<T>>(1000);
-        let task: tokio::task::JoinHandle<()> =
+        self.nanny(
+            ctx,
             ctx.get_async_spawner().spawn_blocking({
                 let ins_mut: std::sync::Arc<
                     std::sync::RwLock<RunnerInsideMutex<T>>,
@@ -189,8 +192,8 @@ impl<T: Send + 'static> Runner<T> {
                         inside_mutex.check_done();
                     }
                 }
-            });
-        self.nanny(ctx, task);
+            }),
+        );
         let mut inside_mutex = self.inside_mutex.write().expect("Runner");
         inside_mutex
             .handlers
@@ -198,7 +201,7 @@ impl<T: Send + 'static> Runner<T> {
     }
 
     pub fn handle_nonterminal_blocking<P, H>(
-        &self,
+        &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         pred: P,
         mut handler: H,
@@ -209,7 +212,8 @@ impl<T: Send + 'static> Runner<T> {
         let pred: std::sync::Arc<dyn Fn(&T) -> bool + Send + Sync> =
             std::sync::Arc::new(pred);
         let (writer, mut reader) = tokio::sync::mpsc::channel::<Box<T>>(1000);
-        let task: tokio::task::JoinHandle<()> =
+        self.nanny(
+            ctx,
             ctx.get_async_spawner().spawn_blocking({
                 let pred: std::sync::Arc<dyn Fn(&T) -> bool + Send + Sync> =
                     std::sync::Arc::clone(&pred);
@@ -250,8 +254,8 @@ impl<T: Send + 'static> Runner<T> {
                         }
                     }
                 }
-            });
-        self.nanny(ctx, task);
+            }),
+        );
         let mut inside_mutex = self.inside_mutex.write().expect("Runner");
         inside_mutex
             .handlers
@@ -259,61 +263,126 @@ impl<T: Send + 'static> Runner<T> {
     }
 
     pub fn handle_nonterminal_async<P, H, F>(
-        &self,
+        &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         pred: P,
-        mut handler: H,
+        handler: H,
+        concurrency: u16,
     ) where
         P: Fn(&T) -> bool + Send + Sync + 'static,
-        H: FnMut(&mut T) -> F + Send + 'static,
+        H: Fn(&mut T) -> F + Send + Sync + 'static,
         F: std::future::Future<Output = ()> + Send,
     {
         let pred: std::sync::Arc<dyn Fn(&T) -> bool + Send + Sync> =
             std::sync::Arc::new(pred);
+
+        let handler: std::sync::Arc<H> = std::sync::Arc::new(handler);
+
+        // Careful not to deadlock. If the predicate is still true after the
+        // handler handles it, we need to loop around right away and do it
+        // again. If we have already moved on to do other work by the time
+        // we notice the predicate is still true, we might already be at max
+        // concurrency, and the queue might be full, and we would just have
+        // no place to put the object. So we have to catch it right away. And
+        // the way we do that is by replacing the handler with a new handler
+        // that knows how to loop.
+        //
+        // The sheer number of Arcs involved here is ugh.
+        //  - The handler replacement will get spawned as a task, so the
+        //    closure portion of it needs to have an Arc that it can clone
+        //    for the benefit of the async block.
+        //  - The thing that will spawn the handler replacement as a task,
+        //    is itself a Future which Rust thinks might outlive the current
+        //    function. So it can't borrow things from the current function,
+        //    it has to own Arcs that it can clone.
+        let handler = {
+            let pred = std::sync::Arc::clone(&pred);
+            let handler: std::sync::Arc<H> = std::sync::Arc::clone(&handler);
+            let ins_mut: std::sync::Arc<
+                std::sync::RwLock<RunnerInsideMutex<T>>,
+            > = std::sync::Arc::clone(&self.inside_mutex);
+            move |mut x: Box<T>| {
+                let pred = std::sync::Arc::clone(&pred);
+                let handler: std::sync::Arc<H> =
+                    std::sync::Arc::clone(&handler);
+                let ins_mut: std::sync::Arc<
+                    std::sync::RwLock<RunnerInsideMutex<T>>,
+                > = std::sync::Arc::clone(&ins_mut);
+                async move {
+                    loop {
+                        handler(x.as_mut()).await;
+                        if !pred(x.as_ref()) {
+                            break x;
+                        }
+                    }
+                }
+            }
+        };
+
         let (writer, mut reader) = tokio::sync::mpsc::channel::<Box<T>>(1000);
-        let task: tokio::task::JoinHandle<()> =
+        let bp: crate::util::BoundedParallelism<Box<T>> =
+            crate::util::BoundedParallelism::new(concurrency);
+        self.nanny(
+            ctx,
             ctx.get_async_spawner().spawn({
-                let pred: std::sync::Arc<dyn Fn(&T) -> bool + Send + Sync> =
-                    std::sync::Arc::clone(&pred);
+                let ctx: std::sync::Arc<crate::ctx::Ctx> =
+                    std::sync::Arc::clone(&ctx);
+                let pred = std::sync::Arc::clone(&pred);
                 let ins_mut: std::sync::Arc<
                     std::sync::RwLock<RunnerInsideMutex<T>>,
                 > = std::sync::Arc::clone(&self.inside_mutex);
                 async move {
                     while let Some(mut x) = reader.recv().await {
-                        // Careful not to deadlock. If the predicate is still
-                        // true after the handler handles it, we should NOT
-                        // put it through the sorting hat again, because we
-                        // might be trying to put it back into our queue, and
-                        // our queue might be full...
-                        //
-                        // So we do this in a loop, and only get the sorting
-                        // hat involved once we are sure it doesn't still match
-                        // the predicate.
-                        loop {
-                            handler(x.as_mut()).await;
-                            if !pred(x.as_ref()) {
-                                break;
-                            } else {
-                                // we still have to acquire the lock and check
-                                // if we are shutting down...
-                                let inside_mutex =
-                                    ins_mut.read().expect("Runner");
-                                inside_mutex.check_for_shutdown();
+                        for res in bp.spawn(&ctx, handler(x)).await {
+                            match res {
+                                Ok(x) => {
+                                    if let Some((x, writer)) = {
+                                        let inside_mutex =
+                                            ins_mut.read().expect("Runner");
+                                        inside_mutex.sorting_hat(x)
+                                    } {
+                                        // We're not holding the lock anymore,
+                                        // so we can block.
+                                        writer
+                                            .send(x)
+                                            .await
+                                            .expect("queue was closed");
+                                    }
+                                }
+                                Err(e) => {
+                                    let mut inside_mutex =
+                                        ins_mut.write().expect("Runner");
+                                    inside_mutex.shutdown_with_error(e);
+                                }
                             }
                         }
-
-                        if let Some((x, writer)) = {
-                            let inside_mutex = ins_mut.read().expect("Runner");
-                            inside_mutex.sorting_hat(x)
-                        } {
-                            // We're not holding the lock anymore, so
-                            // we can block.
-                            writer.send(x).await.expect("queue was closed");
+                    }
+                    for res in bp.drain().await {
+                        match res {
+                            Ok(x) => {
+                                if let Some((x, writer)) = {
+                                    let inside_mutex =
+                                        ins_mut.read().expect("Runner");
+                                    inside_mutex.sorting_hat(x)
+                                } {
+                                    // We're not holding the lock anymore,
+                                    // so we can block.
+                                    writer
+                                        .send(x)
+                                        .await
+                                        .expect("queue was closed");
+                                }
+                            }
+                            Err(e) => {
+                                let mut inside_mutex =
+                                    ins_mut.write().expect("Runner");
+                                inside_mutex.shutdown_with_error(e);
+                            }
                         }
                     }
                 }
-            });
-        self.nanny(ctx, task);
+            }),
+        );
         let mut inside_mutex = self.inside_mutex.write().expect("Runner");
         inside_mutex
             .handlers
@@ -329,7 +398,8 @@ impl<T: Send + 'static> Runner<T> {
         F: FnOnce(tokio::sync::mpsc::Sender<Box<T>>) + Send + 'static,
     {
         let (writer, reader) = tokio::sync::mpsc::channel::<Box<T>>(1000);
-        let task: tokio::task::JoinHandle<()> =
+        self.nanny(
+            ctx,
             ctx.get_async_spawner().spawn_blocking({
                 let ins_mut: std::sync::Arc<
                     std::sync::RwLock<RunnerInsideMutex<T>>,
@@ -340,8 +410,8 @@ impl<T: Send + 'static> Runner<T> {
                     inside_mutex.feeder_done = true;
                     inside_mutex.check_done();
                 }
-            });
-        self.nanny(ctx, task);
+            }),
+        );
         self.run(ctx, reader).await
     }
 
@@ -355,7 +425,8 @@ impl<T: Send + 'static> Runner<T> {
         FF: std::future::Future<Output = ()> + Send,
     {
         let (writer, reader) = tokio::sync::mpsc::channel::<Box<T>>(1000);
-        let task: tokio::task::JoinHandle<()> =
+        self.nanny(
+            ctx,
             ctx.get_async_spawner().spawn({
                 let ins_mut: std::sync::Arc<
                     std::sync::RwLock<RunnerInsideMutex<T>>,
@@ -366,17 +437,17 @@ impl<T: Send + 'static> Runner<T> {
                     inside_mutex.feeder_done = true;
                     inside_mutex.check_done();
                 }
-            });
-        self.nanny(ctx, task);
+            }),
+        );
         self.run(ctx, reader).await
     }
 
     fn nanny(
-        &self,
+        &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         task: tokio::task::JoinHandle<()>,
     ) {
-        let _ = ctx.get_async_spawner().spawn({
+        self.tasks.push(ctx.get_async_spawner().spawn({
             let ins_mut: std::sync::Arc<
                 std::sync::RwLock<RunnerInsideMutex<T>>,
             > = std::sync::Arc::clone(&self.inside_mutex);
@@ -386,7 +457,7 @@ impl<T: Send + 'static> Runner<T> {
                     inside_mutex.shutdown_with_error(e);
                 }
             }
-        });
+        }));
     }
 
     async fn run(
@@ -394,7 +465,8 @@ impl<T: Send + 'static> Runner<T> {
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         mut reader: tokio::sync::mpsc::Receiver<Box<T>>,
     ) -> Result<(), crate::error::WuffError> {
-        let task: tokio::task::JoinHandle<()> =
+        self.nanny(
+            ctx,
             ctx.get_async_spawner().spawn({
                 let ins_mut: std::sync::Arc<
                     std::sync::RwLock<RunnerInsideMutex<T>>,
@@ -418,8 +490,8 @@ impl<T: Send + 'static> Runner<T> {
                     inside_mutex.feed_queue_emptied = true;
                     inside_mutex.check_done();
                 }
-            });
-        self.nanny(ctx, task);
+            }),
+        );
 
         // All the threads are spawned. Each one has a nanny watching it to
         // see if it panics. (The nannies never panic.)
@@ -434,8 +506,20 @@ impl<T: Send + 'static> Runner<T> {
 
         status_event.notified().await;
 
-        let inside_mutex = self.inside_mutex.read().expect("Runner");
-        inside_mutex.status.clone().unwrap()
+        let status: Result<(), crate::error::WuffError> = {
+            let inside_mutex = self.inside_mutex.read().expect("Runner");
+            inside_mutex.status.clone().unwrap()
+        };
+
+        // If it was a success, it's probably worth awaiting all the tasks
+        // we spawned. If it was a failure, just let them fall where they may.
+        if status.is_ok() {
+            while let Some(task) = self.tasks.pop() {
+                task.await.expect("Runner");
+            }
+        }
+
+        status
     }
 }
 
