@@ -1,4 +1,3 @@
-// Philosophy:
 //
 // Two kinds of callbacks you can install for generating Box<T>'s:
 //   * blocking (will be spawned in a thread)
@@ -60,6 +59,12 @@ struct RunnerInsideMutex<T> {
     feeder_done: bool,
     feed_queue_emptied: bool,
     in_flight: u64,
+
+    // If you need it, here's a specially constructed queue writer which will
+    // always return an error if you try to enqueue anything onto it.
+    //
+    // May you never need it.
+    bad_writer: std::sync::Arc<tokio::sync::mpsc::Sender<Box<T>>>,
 }
 
 impl<T> RunnerInsideMutex<T> {
@@ -108,20 +113,26 @@ impl<T> RunnerInsideMutex<T> {
     ) -> Option<(Box<T>, std::sync::Arc<tokio::sync::mpsc::Sender<Box<T>>>)>
     {
         if self.status.is_some() {
-            panic!("runner is shutting down");
+            // We would like to panic. But we can't panic, because we're
+            // holding the lock, and panicking would poison it. So we pull
+            // the pin out of a grenade, and we calmly hand it to our
+            // caller.
+            return Some((x, std::sync::Arc::clone(&self.bad_writer)));
         }
 
         for (pred, writer) in &self.handlers {
             if pred(x.as_ref()) {
                 if let Err(try_send_err) = writer.try_send(x) {
-                    // We want to panic if the queue is closed. If it's just
-                    // full, that's ok...
+                    // If it's full, that's fine, let the caller block, If
+                    // it's closed, that's also fine, let the caller panic.
+                    // We can't panic here, this is bat country.
                     match try_send_err {
                         tokio::sync::mpsc::error::TrySendError::Full(x) => {
                             return Some((x, std::sync::Arc::clone(&writer)));
                         }
-                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                            panic!("queue was closed");
+                        tokio::sync::mpsc::error::TrySendError::Closed(x) => {
+                            // lol
+                            return Some((x, std::sync::Arc::clone(&writer)));
                         }
                     }
                 } else {
@@ -148,6 +159,7 @@ pub struct Runner<T> {
 
 impl<T: Send + 'static> Runner<T> {
     pub fn new() -> Runner<T> {
+        let (bad_writer, _) = tokio::sync::mpsc::channel::<Box<T>>(1);
         Runner {
             inside_mutex: std::sync::Arc::new(std::sync::RwLock::new(
                 RunnerInsideMutex {
@@ -159,6 +171,7 @@ impl<T: Send + 'static> Runner<T> {
                     feeder_done: false,
                     feed_queue_emptied: false,
                     in_flight: 0,
+                    bad_writer: std::sync::Arc::new(bad_writer),
                 },
             )),
             tasks: Vec::new(),
@@ -172,7 +185,9 @@ impl<T: Send + 'static> Runner<T> {
         mut handler: H,
     ) where
         P: Fn(&T) -> bool + Send + Sync + 'static,
-        H: FnMut(Box<T>) + Send + 'static,
+        H: FnMut(Box<T>) -> Result<(), crate::error::WuffError>
+            + Send
+            + 'static,
     {
         let pred: std::sync::Arc<dyn Fn(&T) -> bool + Send + Sync> =
             std::sync::Arc::new(pred);
@@ -185,9 +200,13 @@ impl<T: Send + 'static> Runner<T> {
                 > = std::sync::Arc::clone(&self.inside_mutex);
                 move || {
                     while let Some(x) = reader.blocking_recv() {
-                        handler(x);
+                        let result: Result<(), crate::error::WuffError> =
+                            handler(x);
                         let mut inside_mutex =
                             ins_mut.write().expect("Runner");
+                        if let Err(e) = result {
+                            inside_mutex.shutdown_with_error(e);
+                        }
                         inside_mutex.in_flight -= 1;
                         inside_mutex.check_done();
                     }
@@ -262,6 +281,25 @@ impl<T: Send + 'static> Runner<T> {
             .push((pred, std::sync::Arc::new(writer)));
     }
 
+    // Couple notes:
+    //
+    //   1. The handler is Fn, not FnMut, because we support concurrency.
+    //      If there's ever a need for a version of this that allows FnMut,
+    //      but doesn't allow more than one invocation of the handler to be
+    //      in-flight at the same time, that's ok, that can be added.
+    //
+    //   2. The callback really should be:
+    //        handler: H where
+    //          H: Fn(&mut T) -> F + Send + Sync + 'static,
+    //          F: std::future::Future<Output = ()> + Send,
+    //      but that causes problems because of the reference. Remember that
+    //      an async function that is in the process of executing, is
+    //      represented as a Future, which is just a struct, and so that
+    //      struct is gonna have to be holding that reference, and that might
+    //      even work, normally, but we're doing enough weird stuff here that
+    //      the lifetimes are a gordian knot.
+    //
+    //      So we make the handlers take a Box, and return a Box.
     pub fn handle_nonterminal_async<P, H, F>(
         &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
@@ -270,8 +308,8 @@ impl<T: Send + 'static> Runner<T> {
         concurrency: u16,
     ) where
         P: Fn(&T) -> bool + Send + Sync + 'static,
-        H: Fn(&mut T) -> F + Send + Sync + 'static,
-        F: std::future::Future<Output = ()> + Send,
+        H: Fn(Box<T>) -> F + Send + Sync + 'static,
+        F: std::future::Future<Output = Box<T>> + Send,
     {
         let pred: std::sync::Arc<dyn Fn(&T) -> bool + Send + Sync> =
             std::sync::Arc::new(pred);
@@ -310,7 +348,7 @@ impl<T: Send + 'static> Runner<T> {
                 > = std::sync::Arc::clone(&ins_mut);
                 async move {
                     loop {
-                        handler(x.as_mut()).await;
+                        x = handler(x).await;
                         if !pred(x.as_ref()) {
                             break x;
                         }
@@ -320,8 +358,10 @@ impl<T: Send + 'static> Runner<T> {
         };
 
         let (writer, mut reader) = tokio::sync::mpsc::channel::<Box<T>>(1000);
-        let bp: crate::util::BoundedParallelism<Box<T>> =
-            crate::util::BoundedParallelism::new(concurrency);
+        let bp: std::sync::Arc<crate::util::BoundedParallelism<Box<T>>> =
+            std::sync::Arc::new(crate::util::BoundedParallelism::new(
+                concurrency,
+            ));
         self.nanny(
             ctx,
             ctx.get_async_spawner().spawn({
@@ -331,6 +371,9 @@ impl<T: Send + 'static> Runner<T> {
                 let ins_mut: std::sync::Arc<
                     std::sync::RwLock<RunnerInsideMutex<T>>,
                 > = std::sync::Arc::clone(&self.inside_mutex);
+                let bp: std::sync::Arc<
+                    crate::util::BoundedParallelism<Box<T>>,
+                > = std::sync::Arc::clone(&bp);
                 async move {
                     while let Some(mut x) = reader.recv().await {
                         for res in bp.spawn(&ctx, handler(x)).await {
@@ -357,26 +400,54 @@ impl<T: Send + 'static> Runner<T> {
                             }
                         }
                     }
-                    for res in bp.drain().await {
-                        match res {
-                            Ok(x) => {
-                                if let Some((x, writer)) = {
-                                    let inside_mutex =
-                                        ins_mut.read().expect("Runner");
-                                    inside_mutex.sorting_hat(x)
-                                } {
-                                    // We're not holding the lock anymore,
-                                    // so we can block.
-                                    writer
-                                        .send(x)
-                                        .await
-                                        .expect("queue was closed");
+                }
+            }),
+        );
+        self.nanny(
+            ctx,
+            ctx.get_async_spawner().spawn({
+                let ins_mut: std::sync::Arc<
+                    std::sync::RwLock<RunnerInsideMutex<T>>,
+                > = std::sync::Arc::clone(&self.inside_mutex);
+                let bp: std::sync::Arc<
+                    crate::util::BoundedParallelism<Box<T>>,
+                > = std::sync::Arc::clone(&bp);
+                async move {
+                    loop {
+                        // 1. Wait a little bit
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            100,
+                        ))
+                        .await;
+                        // 2. Check if we're supposed to exit
+                        if {
+                            let inside_mutex = ins_mut.read().expect("Runner");
+                            inside_mutex.status.is_some()
+                        } {
+                            break;
+                        }
+                        // 3. Collect any stragglers
+                        for res in bp.collect() {
+                            match res {
+                                Ok(x) => {
+                                    if let Some((x, writer)) = {
+                                        let inside_mutex =
+                                            ins_mut.read().expect("Runner");
+                                        inside_mutex.sorting_hat(x)
+                                    } {
+                                        // We're not holding the lock anymore,
+                                        // so we can block.
+                                        writer
+                                            .send(x)
+                                            .await
+                                            .expect("queue was closed");
+                                    }
                                 }
-                            }
-                            Err(e) => {
-                                let mut inside_mutex =
-                                    ins_mut.write().expect("Runner");
-                                inside_mutex.shutdown_with_error(e);
+                                Err(e) => {
+                                    let mut inside_mutex =
+                                        ins_mut.write().expect("Runner");
+                                    inside_mutex.shutdown_with_error(e);
+                                }
                             }
                         }
                     }
@@ -528,4 +599,581 @@ impl<T> Drop for Runner<T> {
         let mut inside_mutex = self.inside_mutex.write().expect("Runner");
         inside_mutex.shutdown_with_error("dropped");
     }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+///////////// EVERYTHING BELOW THIS LINE IS RELATED TO UNIT TESTS /////////////
+///////////////////////////////////////////////////////////////////////////////
+
+#[cfg(test)]
+struct TestStateMachineManager {
+    num: usize,
+    done: std::sync::Mutex<Vec<bool>>,
+    state_transitions: std::sync::Mutex<Vec<u8>>,
+}
+#[cfg(test)]
+impl TestStateMachineManager {
+    fn new(num: usize) -> std::sync::Arc<Self> {
+        let mut done: Vec<bool> = Vec::with_capacity(num);
+        done.resize(num, false);
+        let mut state_transitions: Vec<u8> = Vec::with_capacity(num);
+        state_transitions.resize(num, 0u8);
+        std::sync::Arc::new(Self {
+            num: num,
+            done: std::sync::Mutex::new(done),
+            state_transitions: std::sync::Mutex::new(state_transitions),
+        })
+    }
+
+    fn install_for_success(
+        &self,
+        ctx: &std::sync::Arc<crate::ctx::Ctx>,
+        runner: &mut Runner<TestStateMachine>,
+        async_concurrency: u16,
+    ) {
+        runner.handle_terminal(
+            &ctx,
+            TestStateMachine::pred_terminal,
+            TestStateMachine::handle_terminal,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_1,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_2,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_3,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_4,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_5,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_6,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_7,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_8,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+    }
+
+    fn install_with_terminal_that_errors(
+        &self,
+        ctx: &std::sync::Arc<crate::ctx::Ctx>,
+        runner: &mut Runner<TestStateMachine>,
+        async_concurrency: u16,
+    ) {
+        runner.handle_terminal(
+            &ctx,
+            TestStateMachine::pred_terminal,
+            TestStateMachine::handle_terminal_ERR,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_1,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_2,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_3,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_4,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_5,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_6,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_7,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_8,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+    }
+
+    fn install_with_one_blocking_that_panics(
+        &self,
+        ctx: &std::sync::Arc<crate::ctx::Ctx>,
+        runner: &mut Runner<TestStateMachine>,
+        async_concurrency: u16,
+    ) {
+        runner.handle_terminal(
+            &ctx,
+            TestStateMachine::pred_terminal,
+            TestStateMachine::handle_terminal,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_1,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_2,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_3,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_4,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_5,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_6,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_7,
+            TestStateMachine::handle_nonterminal_blocking_PANIC,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_8,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+    }
+
+    fn install_with_one_async_that_panics(
+        &self,
+        ctx: &std::sync::Arc<crate::ctx::Ctx>,
+        runner: &mut Runner<TestStateMachine>,
+        async_concurrency: u16,
+    ) {
+        runner.handle_terminal(
+            &ctx,
+            TestStateMachine::pred_terminal,
+            TestStateMachine::handle_terminal,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_1,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_2,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_3,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_4,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_5,
+            TestStateMachine::handle_nonterminal_blocking,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_6,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+        runner.handle_nonterminal_blocking(
+            &ctx,
+            TestStateMachine::pred_nonterminal_blocking_7,
+            TestStateMachine::handle_nonterminal_blocking_PANIC,
+        );
+        runner.handle_nonterminal_async(
+            &ctx,
+            TestStateMachine::pred_nonterminal_async_8,
+            TestStateMachine::handle_nonterminal_async,
+            async_concurrency,
+        );
+    }
+
+    fn rand_feeder_blocking(
+        self: std::sync::Arc<Self>,
+        writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>,
+    ) {
+        let mut rng: rand::rngs::ThreadRng = rand::thread_rng();
+        for i in 0usize..self.num {
+            writer
+                .blocking_send(Box::new(TestStateMachine {
+                    id: i,
+                    state: rand::RngCore::next_u32(&mut rng) as u8,
+                    mgr: std::sync::Arc::clone(&self),
+                }))
+                .unwrap();
+        }
+    }
+
+    async fn rand_feeder_async(
+        self: std::sync::Arc<Self>,
+        writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>,
+    ) {
+        for i in 0usize..self.num {
+            // rand::rngs::ThreadRng is not Send, and it can't be held across
+            // an await. That means we have to get all the randomness we need,
+            // up front, store it in variables, and then drop the ThreadRng.
+            let state: u8 = {
+                let mut rng: rand::rngs::ThreadRng = rand::thread_rng();
+                rand::RngCore::next_u32(&mut rng) as u8
+            };
+            writer
+                .send(Box::new(TestStateMachine {
+                    id: i,
+                    state: state,
+                    mgr: std::sync::Arc::clone(&self),
+                }))
+                .await
+                .unwrap();
+        }
+    }
+
+    fn deterministic_feeder(
+        self: std::sync::Arc<Self>,
+        writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>,
+    ) {
+        for i in 0usize..self.num {
+            writer
+                .blocking_send(Box::new(TestStateMachine {
+                    id: i,
+                    state: 0xffu8,
+                    mgr: std::sync::Arc::clone(&self),
+                }))
+                .unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+struct TestStateMachine {
+    id: usize,
+    state: u8,
+    mgr: std::sync::Arc<TestStateMachineManager>,
+}
+
+#[cfg(test)]
+impl TestStateMachine {
+    fn handle_terminal(
+        self: Box<Self>,
+    ) -> Result<(), crate::error::WuffError> {
+        let mut done = self.mgr.done.lock().unwrap();
+        done[self.id] = true;
+        Ok(())
+    }
+    fn handle_terminal_ERR(
+        self: Box<Self>,
+    ) -> Result<(), crate::error::WuffError> {
+        if self.id == 5000 {
+            Err("oh hi".into())
+        } else {
+            let mut done = self.mgr.done.lock().unwrap();
+            done[self.id] = true;
+            Ok(())
+        }
+    }
+    fn pred_terminal(&self) -> bool {
+        self.state == 0
+    }
+
+    fn handle_nonterminal_blocking(&mut self) {
+        self.advance_state();
+    }
+    fn handle_nonterminal_blocking_PANIC(&mut self) {
+        if self.id == 5000 {
+            panic!("at the disco");
+        } else {
+            self.advance_state();
+        }
+    }
+    async fn handle_nonterminal_async(mut self: Box<Self>) -> Box<Self> {
+        self.advance_state();
+        self
+    }
+    async fn handle_nonterminal_async_PANIC(mut self: Box<Self>) -> Box<Self> {
+        if self.id == 5000 {
+            panic!("at the disco");
+        } else {
+            self.advance_state();
+            self
+        }
+    }
+    fn pred_nonterminal_blocking_1(&self) -> bool {
+        (self.state & 0x80) == 0x80
+    }
+    fn pred_nonterminal_async_2(&self) -> bool {
+        (self.state & 0xc0) == 0x40
+    }
+    fn pred_nonterminal_blocking_3(&self) -> bool {
+        (self.state & 0xe0) == 0x20
+    }
+    fn pred_nonterminal_async_4(&self) -> bool {
+        (self.state & 0xf0) == 0x10
+    }
+    fn pred_nonterminal_blocking_5(&self) -> bool {
+        (self.state & 0xf8) == 0x08
+    }
+    fn pred_nonterminal_async_6(&self) -> bool {
+        (self.state & 0xfc) == 0x04
+    }
+    fn pred_nonterminal_blocking_7(&self) -> bool {
+        (self.state & 0xfe) == 0x02
+    }
+    fn pred_nonterminal_async_8(&self) -> bool {
+        (self.state & 0xff) == 0x01
+    }
+
+    fn advance_state(&mut self) {
+        // Find the highest bit that is 1, and clear it
+        if (self.state & 0x80) != 0 {
+            self.state &= 0x7f;
+        } else if (self.state & 0x40) != 0 {
+            self.state &= 0x3f;
+        } else if (self.state & 0x20) != 0 {
+            self.state &= 0x1f;
+        } else if (self.state & 0x10) != 0 {
+            self.state &= 0x0f;
+        } else if (self.state & 0x08) != 0 {
+            self.state &= 0x07;
+        } else if (self.state & 0x04) != 0 {
+            self.state &= 0x03;
+        } else if (self.state & 0x02) != 0 {
+            self.state &= 0x01;
+        } else {
+            self.state = 0;
+        }
+        let mut state_transitions = self.mgr.state_transitions.lock().unwrap();
+        state_transitions[self.id] += 1;
+    }
+}
+
+#[test]
+fn test_runner_success_with_blocking_feeder() {
+    let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
+    ctx.run_async_main(async {
+        let mgr = TestStateMachineManager::new(100000);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_for_success(&ctx, &mut runner, 100);
+        runner
+            .run_blocking(&ctx, {
+                let mgr = std::sync::Arc::clone(&mgr);
+                move |writer: tokio::sync::mpsc::Sender<
+                    Box<TestStateMachine>,
+                >| {
+                    mgr.rand_feeder_blocking(writer);
+                }
+            })
+            .await
+            .expect("should have succeeded");
+        let done = mgr.done.lock().unwrap();
+        let state_transitions = mgr.state_transitions.lock().unwrap();
+        for x in std::ops::Deref::deref(&done) {
+            assert!(*x);
+        }
+        let mut total: u32 = 0;
+        for x in std::ops::Deref::deref(&state_transitions) {
+            total += *x as u32;
+        }
+        println!("Ran {} state machines", state_transitions.len());
+        println!(
+            "Average number of state transitions: {}",
+            (total as f32) / (state_transitions.len() as f32)
+        );
+        Ok(())
+    })
+    .expect("unexpected error");
+}
+
+#[test]
+fn test_runner_success_with_async_feeder() {
+    let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
+    ctx.run_async_main(async {
+        let mgr = TestStateMachineManager::new(100000);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_for_success(&ctx, &mut runner, 100);
+        runner
+            .run_async(&ctx, {
+                let mgr = std::sync::Arc::clone(&mgr);
+                move |writer: tokio::sync::mpsc::Sender<
+                    Box<TestStateMachine>,
+                >| { mgr.rand_feeder_async(writer) }
+            })
+            .await
+            .expect("should have succeeded");
+        let done = mgr.done.lock().unwrap();
+        let state_transitions = mgr.state_transitions.lock().unwrap();
+        for x in std::ops::Deref::deref(&done) {
+            assert!(*x);
+        }
+        let mut total: u32 = 0;
+        for x in std::ops::Deref::deref(&state_transitions) {
+            total += *x as u32;
+        }
+        println!("Ran {} state machines", state_transitions.len());
+        println!(
+            "Average number of state transitions: {}",
+            (total as f32) / (state_transitions.len() as f32)
+        );
+        Ok(())
+    })
+    .expect("unexpected error");
+}
+
+#[test]
+fn test_runner_with_panic_in_blocking_handler() {
+    let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
+    ctx.run_async_main(async {
+        let mgr = TestStateMachineManager::new(10000);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_with_one_blocking_that_panics(&ctx, &mut runner, 100);
+        let result = runner
+            .run_blocking(&ctx, {
+                let mgr = std::sync::Arc::clone(&mgr);
+                move |writer: tokio::sync::mpsc::Sender<
+                    Box<TestStateMachine>,
+                >| {
+                    mgr.deterministic_feeder(writer);
+                }
+            })
+            .await;
+        assert!(result.is_err());
+        let done = mgr.done.lock().unwrap();
+        let mut total: u16 = 0;
+        for x in std::ops::Deref::deref(&done) {
+            if *x {
+                total += 1;
+            }
+        }
+        println!("Ran {} state machines", done.len());
+        println!("{} finished before error", total);
+        Ok(())
+    })
+    .expect("unexpected error");
+}
+
+#[test]
+fn test_runner_with_panic_in_async_handler() {
+    let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
+    ctx.run_async_main(async {
+        let mgr = TestStateMachineManager::new(10000);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_with_one_async_that_panics(&ctx, &mut runner, 100);
+        let result = runner
+            .run_blocking(&ctx, {
+                let mgr = std::sync::Arc::clone(&mgr);
+                move |writer: tokio::sync::mpsc::Sender<
+                    Box<TestStateMachine>,
+                >| {
+                    mgr.deterministic_feeder(writer);
+                }
+            })
+            .await;
+        assert!(result.is_err());
+        let done = mgr.done.lock().unwrap();
+        let mut total: u16 = 0;
+        for x in std::ops::Deref::deref(&done) {
+            if *x {
+                total += 1;
+            }
+        }
+        println!("Ran {} state machines", done.len());
+        println!("{} finished before error", total);
+        Ok(())
+    })
+    .expect("unexpected error");
+}
+
+#[test]
+fn test_runner_with_err_in_terminal_handler() {
+    let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
+    ctx.run_async_main(async {
+        let mgr = TestStateMachineManager::new(10000);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_with_terminal_that_errors(&ctx, &mut runner, 100);
+        let result = runner
+            .run_blocking(&ctx, {
+                let mgr = std::sync::Arc::clone(&mgr);
+                move |writer: tokio::sync::mpsc::Sender<
+                    Box<TestStateMachine>,
+                >| {
+                    mgr.deterministic_feeder(writer);
+                }
+            })
+            .await;
+        assert!(result.is_err());
+        let done = mgr.done.lock().unwrap();
+        let mut total: u16 = 0;
+        for x in std::ops::Deref::deref(&done) {
+            if *x {
+                total += 1;
+            }
+        }
+        println!("Ran {} state machines", done.len());
+        println!("{} finished before error", total);
+        Ok(())
+    })
+    .expect("unexpected error");
 }

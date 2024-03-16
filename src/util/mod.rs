@@ -40,6 +40,9 @@ impl<T: Send + 'static> BoundedParallelism<T> {
         }
     }
 
+    // It is *not* safe to have a spawn() and a drain() happening at the same
+    // time. That is because tokio only has these weird tokio::sync::Notify
+    // things, not proper condition variables.
     pub async fn spawn<F>(
         &self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
@@ -89,6 +92,12 @@ impl<T: Send + 'static> BoundedParallelism<T> {
         results
     }
 
+    // It is *not* safe to have a spawn() and a drain() happening at the same
+    // time. That is because tokio only has these weird tokio::sync::Notify
+    // things, not proper condition variables.
+    //
+    // If you want to do a drain, but there is a danger that there might be a
+    // spawn() that is also happening, you can try to use collect() instead.
     pub async fn drain(&self) -> Vec<Result<T, crate::error::WuffError>> {
         let mut results: Vec<Result<T, crate::error::WuffError>> = Vec::new();
         loop {
@@ -105,6 +114,19 @@ impl<T: Send + 'static> BoundedParallelism<T> {
             }
             self.helper.cv.notified().await
         }
+        results
+    }
+
+    // Non-async, non-blocking version of drain(). This just collects whatever
+    // happens to be available, right now, and hands it to you.
+    //
+    // Unlike drain(), this is perfectly safe to call when there is a spawn()
+    // happening at the same time.
+    pub fn collect(&self) -> Vec<Result<T, crate::error::WuffError>> {
+        let mut results: Vec<Result<T, crate::error::WuffError>> = Vec::new();
+        let mut inside_mutex =
+            self.helper.inside_mutex.lock().expect("BoundedParallelism");
+        std::mem::swap(&mut results, &mut inside_mutex.results);
         results
     }
 }
