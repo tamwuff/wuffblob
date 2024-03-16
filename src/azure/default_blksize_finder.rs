@@ -33,8 +33,8 @@ impl azure_core::SeekableStream for FakeThing {
 impl futures::io::AsyncRead for FakeThing {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        mut buf: &mut [u8],
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut [u8],
     ) -> std::task::Poll<Result<usize, futures::io::Error>> {
         std::task::Poll::Ready(Ok(0))
     }

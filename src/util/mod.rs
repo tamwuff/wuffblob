@@ -193,7 +193,7 @@ fn make_temp_file_or_dir(
 
 #[allow(dead_code)]
 pub fn fake_local_metadata(desired_size: Option<u64>) -> std::fs::Metadata {
-    let (metadata, f) = if let Some(nbytes) = desired_size {
+    let (metadata, _) = if let Some(nbytes) = desired_size {
         let mut v: Vec<u8> = Vec::with_capacity(nbytes as usize);
         v.resize(nbytes as usize, 0);
         make_temp_file_or_dir(Some(v.as_slice()))
@@ -205,7 +205,7 @@ pub fn fake_local_metadata(desired_size: Option<u64>) -> std::fs::Metadata {
 
 #[allow(dead_code)]
 pub fn temp_local_file(contents: &str) -> std::fs::File {
-    let (metadata, f) = make_temp_file_or_dir(Some(contents.as_bytes()));
+    let (_, f) = make_temp_file_or_dir(Some(contents.as_bytes()));
     f.unwrap()
 }
 

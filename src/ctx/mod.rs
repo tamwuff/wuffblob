@@ -3,8 +3,8 @@ pub struct Ctx {
     pub dry_run: bool,
     pub azure_client: crate::azure::AzureClient,
     tokio_runtime: tokio::runtime::Runtime,
-    data_concurrency: u16,
-    metadata_concurrency: u16,
+    pub data_concurrency: u16,
+    pub metadata_concurrency: u16,
     mime_type_guessers:
         Vec<Box<dyn crate::mimetypes::MimeTypes + Sync + Send>>,
 }

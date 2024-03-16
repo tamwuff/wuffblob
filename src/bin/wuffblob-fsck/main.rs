@@ -580,9 +580,7 @@ async fn async_main(
                     crate::state_machine::FileCheckerState::Terminal => {}
 
                     crate::state_machine::FileCheckerState::Message(_)
-                    | crate::state_machine::FileCheckerState::UserInteraction(
-                        _,
-                    ) => {
+                    | crate::state_machine::FileCheckerState::UserInteraction(_) => {
                         ui_writer.send(Some(file_checker)).await?;
                     }
 

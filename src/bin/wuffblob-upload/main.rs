@@ -4,41 +4,30 @@
 // work that needs to be retried. But we won't purposely press on after an
 // error. We want the user to be aware, and fix it.
 //
-// Here is how the queues work. Implicitly every stage can add something to
-// the error queue and cause the whole thing to halt. That is not explicitly
-// specified in the below, but it is implied everywhere.
-//   - The lister thread generates tuples of (local_path, remote_path,
-//     metadata) and feeds them into the metadata queue.
-//   - The metadata task always does a "get" in Azure. If it determines that
-//     all we need to do is make an empty directory, it'll take care of that
-//     itself, rather than farming that off to some other task. This is why
-//     it has to have a more inclusive name than the "getter task". It feeds
-//     into either the uploader queue or the local-hasher queue.
-//   - The local hasher thread feeds into the uploader queue.
-//   - The uploader task is also responsible for deleting the old blob in
+//   - The feeder is responsible for figuring out the local_path, the
+//     remote_path, and the local_metadata, then it passes it on to the
+//     metadata stage.
+//   - The metadata stage always starts with a "get" in Azure. If it
+//     determines that all we need to do is make an empty directory, it'll
+//     take care of that itself, rather than farming that off to some other
+//     stage. It feeds into either the uploader stage or the local-hasher
+//     stage.
+//   - The local hasher stage feeds into the uploader stage.
+//   - The uploader stage is also responsible for deleting the old blob in
 //     Azure before it starts the upload, if that is needed. Yes that is a
 //     metadata operation, yes it would be slightly more efficient to let
-//     the metadata task handle that part, but that would introduce a cycle
-//     in the graph and it's just easier to keep things linear. After it is
-//     done uploading, if the user has requested verification, it feeds into
-//     the verification queue.
-//
-// The error queue should only be used for errors that relate directly to
-// files on the local filesystem or in the cloud. It shouldn't be used for
-// "failed to write to queue" types of things. Just panic in that case.
-// The main thread will collect everyone's panics and all the errors, and
-// it will decide how to present all of it to the user.
+//     the metadata stage handle that part, but that would introduce a cycle
+//     in the graph.
+//   - After it is done uploading, if the user has requested verification, it
+//     feeds into the verification stage.
 
 mod ctx;
 mod state_machine;
 
-fn list_local_dirs(
-    ctx: std::sync::Arc<crate::ctx::Ctx>,
-    err_writer: tokio::sync::mpsc::Sender<String>,
-    metadata_writer: tokio::sync::mpsc::Sender<
-        Box<crate::state_machine::Uploader>,
-    >,
-) {
+fn feed(
+    ctx: &std::sync::Arc<crate::ctx::Ctx>,
+    writer: tokio::sync::mpsc::Sender<Box<crate::state_machine::Uploader>>,
+) -> Result<(), wuffblob::error::WuffError> {
     // The rule is: you don't add stuff to the LIFO unless you have verified
     // that it is actually a bona-fide directory, and not just a symlink that
     // points at a directory.
@@ -47,37 +36,32 @@ fn list_local_dirs(
     // be symlinks that point at directories.
     let mut lifo: Vec<(std::path::PathBuf, wuffblob::path::WuffPath)> =
         Vec::with_capacity(ctx.to_upload.len());
-    let dispatch = |uploader: Box<crate::state_machine::Uploader>| {
-        println!("{:#?}", uploader.as_ref());
-    };
 
     for (local_path, remote_path) in &ctx.to_upload {
         let maybe_metadata: Result<std::fs::Metadata, std::io::Error> =
             std::fs::metadata(local_path);
         if let Err(e) = maybe_metadata {
-            err_writer
-                .blocking_send(format!("{:?}: {}", local_path, e))
-                .expect("error reader died");
-            continue;
+            return Err(format!("{:?}: {}", local_path, e).into());
         }
         let metadata: std::fs::Metadata = maybe_metadata.unwrap();
         let file_type: std::fs::FileType = metadata.file_type();
         if file_type.is_file() {
-            dispatch(Box::new(crate::state_machine::Uploader::new(
-                &ctx,
-                local_path.clone(),
-                remote_path.clone(),
-                metadata,
-            )));
+            writer
+                .blocking_send(Box::new(crate::state_machine::Uploader::new(
+                    &ctx,
+                    local_path.clone(),
+                    remote_path.clone(),
+                    metadata,
+                )))
+                .expect("reader died");
         } else if file_type.is_dir() {
             lifo.push((local_path.clone(), remote_path.clone()));
         } else {
-            err_writer
-                .blocking_send(format!(
-                    "{:?}: cannot upload {:?}",
-                    local_path, file_type
-                ))
-                .expect("error reader died");
+            return Err(format!(
+                "{:?}: cannot upload {:?}",
+                local_path, file_type
+            )
+            .into());
         }
     }
 
@@ -85,20 +69,14 @@ fn list_local_dirs(
         let maybe_dir_entries: Result<std::fs::ReadDir, std::io::Error> =
             std::fs::read_dir(&local_path);
         if let Err(e) = maybe_dir_entries {
-            err_writer
-                .blocking_send(format!("{:?}: {}", local_path, e))
-                .expect("error reader died");
-            continue;
+            return Err(format!("{:?}: {}", local_path, e).into());
         }
         let dir_entries: std::fs::ReadDir = maybe_dir_entries.unwrap();
         let mut seen_any: bool = false;
         for maybe_dir_entry in dir_entries {
             seen_any = true;
             if let Err(e) = maybe_dir_entry {
-                err_writer
-                    .blocking_send(format!("{:?}: {}", local_path, e))
-                    .expect("error reader died");
-                continue;
+                return Err(format!("{:?}: {}", local_path, e).into());
             }
             let dir_entry: std::fs::DirEntry = maybe_dir_entry.unwrap();
             let new_basename: std::ffi::OsString = dir_entry.file_name();
@@ -112,20 +90,14 @@ fn list_local_dirs(
                 std::io::Error,
             > = dir_entry.file_type();
             if let Err(e) = maybe_orig_file_type {
-                err_writer
-                    .blocking_send(format!("{:?}: {}", new_local_path, e))
-                    .expect("error reader died");
-                continue;
+                return Err(format!("{:?}: {}", new_local_path, e).into());
             }
             let orig_file_type: std::fs::FileType =
                 maybe_orig_file_type.unwrap();
             let maybe_new_metadata: Result<std::fs::Metadata, std::io::Error> =
                 std::fs::metadata(&new_local_path);
             if let Err(e) = maybe_new_metadata {
-                err_writer
-                    .blocking_send(format!("{:?}: {}", new_local_path, e))
-                    .expect("error reader died");
-                continue;
+                return Err(format!("{:?}: {}", new_local_path, e).into());
             }
             let new_metadata: std::fs::Metadata = maybe_new_metadata.unwrap();
             // We mostly trust the metadata as far as what kind of thing this
@@ -133,63 +105,412 @@ fn list_local_dirs(
             // kick it out if it's a symlink that is pointing to a directory.
             let file_type: std::fs::FileType = new_metadata.file_type();
             if file_type.is_file() {
-                dispatch(Box::new(crate::state_machine::Uploader::new(
-                    &ctx,
-                    new_local_path,
-                    new_remote_path,
-                    new_metadata,
-                )));
+                writer
+                    .blocking_send(Box::new(
+                        crate::state_machine::Uploader::new(
+                            &ctx,
+                            new_local_path,
+                            new_remote_path,
+                            new_metadata,
+                        ),
+                    ))
+                    .expect("reader died");
             } else if file_type.is_dir() {
                 if orig_file_type.is_symlink() {
-                    err_writer
-                        .blocking_send(format!(
-                            "{:?}: cannot upload {:?}",
-                            new_local_path, orig_file_type
-                        ))
-                        .expect("error reader died");
+                    return Err(format!(
+                        "{:?}: cannot follow symbolic link to directory",
+                        new_local_path
+                    )
+                    .into());
                 } else {
                     lifo.push((new_local_path, new_remote_path));
                 }
             } else {
-                err_writer
-                    .blocking_send(format!(
-                        "{:?}: cannot upload {:?}",
-                        new_local_path, file_type
-                    ))
-                    .expect("error reader died");
+                return Err(format!(
+                    "{:?}: cannot upload {:?}",
+                    new_local_path, file_type
+                )
+                .into());
             }
         }
         if !seen_any {
             let maybe_metadata: Result<std::fs::Metadata, std::io::Error> =
                 std::fs::metadata(&local_path);
             if let Err(e) = maybe_metadata {
-                err_writer
-                    .blocking_send(format!("{:?}: {}", local_path, e))
-                    .expect("error reader died");
-                continue;
+                return Err(format!("{:?}: {}", local_path, e).into());
             }
             let metadata: std::fs::Metadata = maybe_metadata.unwrap();
             // It had better be a directory...!
             let file_type: std::fs::FileType = metadata.file_type();
             if file_type.is_dir() {
-                dispatch(Box::new(crate::state_machine::Uploader::new(
-                    &ctx,
-                    local_path,
-                    remote_path,
-                    metadata,
-                )));
-            } else {
-                err_writer
-                    .blocking_send(format!(
-                        "{:?}: expecting directory, found {:?}",
-                        local_path, file_type
+                writer
+                    .blocking_send(Box::new(
+                        crate::state_machine::Uploader::new(
+                            &ctx,
+                            local_path,
+                            remote_path,
+                            metadata,
+                        ),
                     ))
-                    .expect("error reader died");
+                    .expect("reader died");
+            } else {
+                return Err(format!(
+                    "{:?}: expecting directory, found {:?}",
+                    local_path, file_type
+                )
+                .into());
             }
         }
     }
+    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+        stats.done_listing = true;
+    });
+    Ok(())
+}
 
-    //metadata_writer.blocking_send(uploader).expect("Metadata fetcher task died");
+async fn do_metadata(
+    ctx: std::sync::Arc<crate::ctx::Ctx>,
+    mut uploader: Box<crate::state_machine::Uploader>,
+) -> Box<crate::state_machine::Uploader> {
+    let maybe_filename_as_string: Result<String, std::ffi::OsString> =
+        uploader.remote_path.to_osstring().into_string();
+    if maybe_filename_as_string.is_err() {
+        match uploader.state {
+            crate::state_machine::UploaderState::GetRemoteMetadata => {
+                uploader.get_remote_metadata_failed(
+                    &ctx,
+                    &wuffblob::error::WuffError::from(
+                        "path is not valid unicode",
+                    ),
+                );
+            }
+            crate::state_machine::UploaderState::Mkdir => {
+                uploader.mkdir_failed(
+                    &ctx,
+                    &wuffblob::error::WuffError::from(
+                        "path is not valid unicode",
+                    ),
+                );
+            }
+            _ => {
+                panic!("wrong state");
+            }
+        }
+        return uploader;
+    }
+
+    match uploader.state {
+        crate::state_machine::UploaderState::GetRemoteMetadata => {
+            let blob_client: azure_storage_blobs::prelude::BlobClient = ctx
+                .base_ctx
+                .azure_client
+                .container_client
+                .blob_client(maybe_filename_as_string.unwrap());
+            match blob_client.get_properties().into_future().await {
+                Ok(resp) => {
+                    uploader
+                        .provide_remote_metadata(&ctx, resp.blob.properties);
+                }
+                Err(e) => {
+                    if let azure_core::error::ErrorKind::HttpResponse {
+                        status: azure_core::StatusCode::NotFound,
+                        ..
+                    } = e.kind()
+                    {
+                        uploader.there_is_no_remote_metadata(&ctx);
+                    } else {
+                        uploader.get_remote_metadata_failed(
+                            &ctx,
+                            &wuffblob::error::WuffError::from(e),
+                        );
+                    }
+                }
+            }
+        }
+        crate::state_machine::UploaderState::Mkdir => {
+            let dir_client: azure_storage_datalake::clients::DirectoryClient =
+                ctx.base_ctx
+                    .azure_client
+                    .data_lake_client
+                    .get_directory_client(maybe_filename_as_string.unwrap());
+
+            // Making a directory is an entirely best-effort operation. Some
+            // types of Azure storage account don't even support directories.
+            // So we try our best, but if we get an error there's nothing we
+            // can do.
+            let _ = dir_client
+                .create_if_not_exists()
+                .resource(azure_storage_datalake::request_options::ResourceType::Directory)
+                .into_future()
+                .await;
+            // We always tell the uploader that it worked. What else can we do?
+            uploader.mkdir_succeeded(&ctx);
+        }
+        _ => {
+            panic!("wrong state");
+        }
+    }
+    uploader
+}
+
+#[cfg(unix)]
+fn hash_buf_size(metadata: &std::fs::Metadata) -> usize {
+    let mut buf_size: usize =
+        std::os::unix::fs::MetadataExt::blksize(metadata) as usize;
+    // keep doubling until it's at least 1 MB
+    while buf_size < 1048576 {
+        buf_size *= 2;
+    }
+    buf_size
+}
+
+#[cfg(not(unix))]
+fn hash_buf_size(metadata: &std::fs::Metadata) -> usize {
+    // just use 1 MB
+    1048576
+}
+
+fn do_hash(
+    ctx: &std::sync::Arc<crate::ctx::Ctx>,
+    buf: &mut Vec<u8>,
+    uploader: &mut crate::state_machine::Uploader,
+) {
+    let mut f: std::fs::File = {
+        match std::fs::File::open(&uploader.local_path) {
+            Ok(f) => f,
+            Err(e) => {
+                uploader
+                    .hash_failed(ctx, &wuffblob::error::WuffError::from(e));
+                return;
+            }
+        }
+    };
+    buf.resize(hash_buf_size(&uploader.local_metadata), 0u8);
+    let mut hasher: md5::Md5 = <md5::Md5 as md5::Digest>::new();
+    let mut num_bytes_left: u64 = uploader.local_metadata.len();
+    while num_bytes_left > 0 {
+        if (buf.len() as u64) > num_bytes_left {
+            buf.resize(num_bytes_left as usize, 0u8);
+        }
+        if let Err(e) = std::io::Read::read_exact(&mut f, buf.as_mut_slice()) {
+            uploader.hash_failed(ctx, &wuffblob::error::WuffError::from(e));
+            return;
+        }
+        <md5::Md5 as md5::Digest>::update(&mut hasher, &buf);
+        num_bytes_left -= buf.len() as u64;
+        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+            stats.bytes_completed_hashing_locally += buf.len() as u64;
+        });
+    }
+    uploader.provide_hash(
+        ctx,
+        <md5::Md5 as md5::Digest>::finalize(hasher)
+            .as_slice()
+            .try_into()
+            .unwrap(),
+    );
+}
+
+async fn do_upload(
+    ctx: std::sync::Arc<crate::ctx::Ctx>,
+    mut uploader: Box<crate::state_machine::Uploader>,
+) -> Box<crate::state_machine::Uploader> {
+    let maybe_filename_as_string: Result<String, std::ffi::OsString> =
+        uploader.remote_path.to_osstring().into_string();
+    if maybe_filename_as_string.is_err() {
+        uploader.upload_failed(
+            &ctx,
+            &wuffblob::error::WuffError::from("path is not valid unicode"),
+        );
+        return uploader;
+    }
+
+    let blob_client: azure_storage_blobs::prelude::BlobClient = ctx
+        .base_ctx
+        .azure_client
+        .container_client
+        .blob_client(maybe_filename_as_string.unwrap());
+
+    // Make sure we can open our local file, before we delete the one in Azure
+    let f: wuffblob::azure::FileForUpload =
+        match std::fs::File::open(&uploader.local_path) {
+            Ok(f) => wuffblob::azure::FileForUpload::new(
+                f,
+                &uploader.local_metadata,
+            ),
+            Err(e) => {
+                uploader
+                    .upload_failed(&ctx, &wuffblob::error::WuffError::from(e));
+                return uploader;
+            }
+        };
+
+    if let crate::state_machine::UploaderState::Upload(true) = uploader.state {
+        if let Err(e) = blob_client.delete().into_future().await {
+            uploader.upload_failed(&ctx, &wuffblob::error::WuffError::from(e));
+            return uploader;
+        }
+    }
+
+    let num_blob_blocks: u16 = f.num_blob_blocks();
+    let mut block_ids: Vec<azure_storage_blobs::prelude::BlobBlockType> =
+        Vec::with_capacity(num_blob_blocks as usize);
+    for block_num in 0..num_blob_blocks {
+        let chunk: Box<dyn azure_core::SeekableStream> =
+            Box::new(f.get_chunk_for_upload(block_num));
+
+        // for some reason you can make a BlockId from a vector but not from
+        // an array directly. which is no problem, it's just odd. We can make
+        // a vector.
+        let block_num_as_bytes: Vec<u8> = block_num.to_be_bytes().into();
+
+        let block_id: azure_storage_blobs::prelude::BlockId =
+            azure_storage_blobs::prelude::BlockId::new(block_num_as_bytes);
+        block_ids.push(
+            azure_storage_blobs::blob::BlobBlockType::new_uncommitted(
+                block_id.clone(),
+            ),
+        );
+
+        if let Err(e) =
+            blob_client.put_block(block_id, chunk).into_future().await
+        {
+            uploader.upload_failed(&ctx, &wuffblob::error::WuffError::from(e));
+            return uploader;
+        }
+    }
+    let hash: [u8; 16] = match f.get_hash() {
+        Ok(hash) => hash,
+        Err(e) => {
+            uploader.upload_failed(&ctx, &e);
+            return uploader;
+        }
+    };
+    if let Err(e) = blob_client
+        .put_block_list(azure_storage_blobs::blob::BlockList {
+            blocks: block_ids,
+        })
+        .content_md5(hash)
+        .content_type(uploader.desired_content_type)
+        .into_future()
+        .await
+    {
+        uploader.upload_failed(&ctx, &wuffblob::error::WuffError::from(e));
+        return uploader;
+    }
+    uploader.upload_succeeded(&ctx, hash);
+
+    uploader
+}
+
+async fn do_verify(
+    ctx: std::sync::Arc<crate::ctx::Ctx>,
+    mut uploader: Box<crate::state_machine::Uploader>,
+) -> Box<crate::state_machine::Uploader> {
+    let maybe_filename_as_string: Result<String, std::ffi::OsString> =
+        uploader.remote_path.to_osstring().into_string();
+    if maybe_filename_as_string.is_err() {
+        uploader.verify_failed(
+            &ctx,
+            &wuffblob::error::WuffError::from("path is not valid unicode"),
+        );
+        return uploader;
+    }
+
+    let blob_client: azure_storage_blobs::prelude::BlobClient = ctx
+        .base_ctx
+        .azure_client
+        .container_client
+        .blob_client(maybe_filename_as_string.unwrap());
+
+    let mut chunks_stream = blob_client.get().into_stream();
+    let mut hasher: md5::Md5 = <md5::Md5 as md5::Digest>::new();
+    let expected_len: u64 = uploader.local_metadata.len();
+    let mut num_bytes_hashed: u64 = 0u64;
+    // We desperately do not want to move anything here, because moves
+    // mean copying. We borrow even when it would seem to be in our best
+    // interest to consume...!
+    while let Some(ref mut maybe_chunk) =
+        futures::stream::StreamExt::next(&mut chunks_stream).await
+    {
+        match maybe_chunk {
+            Ok(ref mut chunk) => {
+                let chunk_stream = &mut chunk.data;
+                while let Some(ref maybe_buf) =
+                    futures::stream::StreamExt::next(chunk_stream).await
+                {
+                    match maybe_buf {
+                        Ok(ref buf) => {
+                            let buf_len: usize = buf.len();
+                            <md5::Md5 as md5::Digest>::update(
+                                &mut hasher,
+                                buf,
+                            );
+                            num_bytes_hashed += buf_len as u64;
+                            ctx.mutate_stats(
+                                |stats: &mut crate::ctx::Stats| {
+                                    //stats.hash_bytes_complete += buf_len as u64;
+                                },
+                            );
+                        }
+                        Err(err) => {
+                            uploader.verify_failed(
+                                &ctx,
+                                &wuffblob::error::WuffError::from(err),
+                            );
+                            ctx.mutate_stats(
+                                |stats: &mut crate::ctx::Stats| {
+                                    //stats.hash_bytes_complete -= num_bytes_hashed;
+                                    //stats.hash_required -= 1u64;
+                                    //stats.hash_bytes_required -= expected_len;
+                                },
+                            );
+                            return uploader;
+                        }
+                    }
+                }
+            }
+            Err(ref err) => {
+                uploader.verify_failed(
+                    &ctx,
+                    &wuffblob::error::WuffError::from(err),
+                );
+                ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                    //stats.hash_bytes_complete -= num_bytes_hashed;
+                    //stats.hash_required -= 1u64;
+                    //stats.hash_bytes_required -= expected_len;
+                });
+                return uploader;
+            }
+        }
+    }
+    if num_bytes_hashed != expected_len {
+        uploader.verify_failed(
+            &ctx,
+            &wuffblob::error::WuffError::from(format!(
+                "Expected {} bytes, got {} instead",
+                expected_len, num_bytes_hashed
+            )),
+        );
+        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+            //stats.hash_bytes_complete -= num_bytes_hashed;
+            //stats.hash_required -= 1u64;
+            //stats.hash_bytes_required -= expected_len;
+        });
+        return uploader;
+    }
+    uploader.verify_succeeded(
+        &ctx,
+        <md5::Md5 as md5::Digest>::finalize(hasher)
+            .as_slice()
+            .try_into()
+            .unwrap(),
+    );
+    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+        //stats.hash_complete += 1;
+    });
+
+    uploader
 }
 
 async fn async_main(
@@ -202,37 +523,118 @@ async fn async_main(
         }
     })?;
 
-    // I would use a tokio::sync::oneshot::channel for errors, but its Sender
-    // doesn't implement Clone... So the err channel is an MPSC channel, but
-    // it is used as if it were a one-shot.
-    let (err_writer, err_reader) =
-        tokio::sync::mpsc::channel::<String>(1000usize);
-    let (metadata_writer, metadata_reader) = tokio::sync::mpsc::channel::<
-        Box<crate::state_machine::Uploader>,
-    >(1000usize);
-    let (hasher_writer, hasher_reader) = tokio::sync::mpsc::channel::<
-        Box<crate::state_machine::Uploader>,
-    >(1000usize);
-    let (uploader_writer, uploader_reader) = tokio::sync::mpsc::channel::<
-        Box<crate::state_machine::Uploader>,
-    >(1000usize);
-    let (verifier_writer, verifier_reader) = tokio::sync::mpsc::channel::<
-        Box<crate::state_machine::Uploader>,
-    >(1000usize);
+    let mut runner: wuffblob::runner::Runner<crate::state_machine::Uploader> =
+        wuffblob::runner::Runner::new(1000);
 
-    let lister_thread: tokio::task::JoinHandle<()> =
-        ctx.base_ctx.get_async_spawner().spawn_blocking({
+    runner.handle_terminal(
+        &ctx.base_ctx,
+        |uploader: &crate::state_machine::Uploader| {
+            matches!(uploader.state, crate::state_machine::UploaderState::Ok)
+        },
+        |_uploader: Box<crate::state_machine::Uploader>| -> Result<(), wuffblob::error::WuffError> {
+            Ok(())
+        },
+    );
+
+    runner.handle_terminal(
+        &ctx.base_ctx,
+        |uploader: &crate::state_machine::Uploader| {
+            matches!(
+                uploader.state,
+                crate::state_machine::UploaderState::Error(_)
+            )
+        },
+        |uploader: Box<crate::state_machine::Uploader>| -> Result<(), wuffblob::error::WuffError> {
+            if let crate::state_machine::UploaderState::Error(e) = uploader.state {
+                Err(e.into())
+            } else {
+                panic!("wrong state");
+            }
+        },
+    );
+
+    runner.handle_nonterminal_async(
+        &ctx.base_ctx,
+        |uploader: &crate::state_machine::Uploader| {
+            matches!(
+                uploader.state,
+                crate::state_machine::UploaderState::GetRemoteMetadata
+                    | crate::state_machine::UploaderState::Mkdir
+            )
+        },
+        {
             let ctx: std::sync::Arc<crate::ctx::Ctx> =
                 std::sync::Arc::clone(&ctx);
-            let err_writer: tokio::sync::mpsc::Sender<String> =
-                err_writer.clone();
-            move || {
-                list_local_dirs(ctx, err_writer, metadata_writer);
+            move |uploader: Box<crate::state_machine::Uploader>| {
+                do_metadata(std::sync::Arc::clone(&ctx), uploader)
             }
-        });
-    lister_thread.await;
+        },
+        ctx.base_ctx.metadata_concurrency,
+    );
 
-    Ok(())
+    runner.handle_nonterminal_blocking(
+        &ctx.base_ctx,
+        |uploader: &crate::state_machine::Uploader| {
+            matches!(uploader.state, crate::state_machine::UploaderState::Hash)
+        },
+        {
+            let ctx: std::sync::Arc<crate::ctx::Ctx> =
+                std::sync::Arc::clone(&ctx);
+            let mut buf: Vec<u8> = Vec::new();
+            move |uploader: &mut crate::state_machine::Uploader| {
+                do_hash(&ctx, &mut buf, uploader)
+            }
+        },
+    );
+
+    runner.handle_nonterminal_async(
+        &ctx.base_ctx,
+        |uploader: &crate::state_machine::Uploader| {
+            matches!(
+                uploader.state,
+                crate::state_machine::UploaderState::Upload(_)
+            )
+        },
+        {
+            let ctx: std::sync::Arc<crate::ctx::Ctx> =
+                std::sync::Arc::clone(&ctx);
+            move |uploader: Box<crate::state_machine::Uploader>| {
+                do_upload(std::sync::Arc::clone(&ctx), uploader)
+            }
+        },
+        ctx.base_ctx.data_concurrency,
+    );
+
+    runner.handle_nonterminal_async(
+        &ctx.base_ctx,
+        |uploader: &crate::state_machine::Uploader| {
+            matches!(
+                uploader.state,
+                crate::state_machine::UploaderState::Verify
+            )
+        },
+        {
+            let ctx: std::sync::Arc<crate::ctx::Ctx> =
+                std::sync::Arc::clone(&ctx);
+            move |uploader: Box<crate::state_machine::Uploader>| {
+                do_verify(std::sync::Arc::clone(&ctx), uploader)
+            }
+        },
+        ctx.base_ctx.data_concurrency,
+    );
+
+    runner
+        .run_blocking(&ctx.base_ctx, {
+            let ctx: std::sync::Arc<crate::ctx::Ctx> =
+                std::sync::Arc::clone(&ctx);
+            move |writer: tokio::sync::mpsc::Sender<
+                Box<crate::state_machine::Uploader>,
+            >|
+                  -> Result<(), wuffblob::error::WuffError> {
+                feed(&ctx, writer)
+            }
+        })
+        .await
 }
 
 fn main() -> Result<(), wuffblob::error::WuffError> {

@@ -109,7 +109,7 @@ impl azure_core::SeekableStream for FileChunkForUpload {
 impl futures::io::AsyncRead for FileChunkForUpload {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
         mut buf: &mut [u8],
     ) -> std::task::Poll<Result<usize, futures::io::Error>> {
         let mut inside_mutex =
@@ -222,12 +222,12 @@ impl FileForUpload {
     }
 
     pub fn get_hash(&self) -> Result<[u8; 16], crate::error::WuffError> {
-        let mut inside_mutex =
-            self.inside_mutex.lock().expect("FileForUpload");
+        let inside_mutex = self.inside_mutex.lock().expect("FileForUpload");
         inside_mutex.bph.digest(self.len)
     }
 
     // this is not public, this is only for unit tests in this module
+    #[cfg(test)]
     fn set_blob_block_size(&mut self, blob_block_size: u64) {
         self.blob_block_size = blob_block_size;
     }
@@ -291,7 +291,8 @@ impl FileForUpload {
         // So we take what the OS gave us, and we keep doubling it, until it is
         // at least as big as what the Azure library would have defaulted to.
 
-        let min_blksize: usize = crate::azure::default_blksize_finder::get_azure_seekable_stream_default_buffer_size();
+        let min_blksize: usize =
+            crate::azure::default_blksize_finder::get_azure_seekable_stream_default_buffer_size();
 
         assert!(blksize > 0);
         while blksize < min_blksize {

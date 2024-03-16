@@ -1,4 +1,3 @@
-//
 // Two kinds of callbacks you can install for generating Box<T>'s:
 //   * blocking (will be spawned in a thread)
 //   * async (will be spawned as a task)
@@ -8,15 +7,21 @@
 // and when it's done with those T's, then it's done.
 //
 // Three kinds of callbacks you can install for dealing with individual T's:
-//   * terminal (assumed to be blocking, will be called from a thread, and
-//     will have a signature which completely consumes the Box<T>
+//   * terminal (blocking, will be called from a thread with concurrency 1,
+//     will accept and consume a Box<T>, and return a Result)
 //   * nonterminal blocking (will be called from a thread with concurrency 1,
-//     will accept a Box<T> and return a Box<T>)
+//     will accept a &mut T)
 //   * nonterminal async (will be called from a task with the given
 //     concurrency, will accept a Box<T> and return a Box<T>)
-// All three of these are infallible. If something really truly catastrophic
+// The last two of these are infallible. If something really truly catastrophic
 // happens they can panic, but the expectation is that most of the time
-// anything that goes wrong can be handled by setting the T to an error state.
+// anything that goes wrong can be handled by setting the T to an error state,
+// which is presumably a terminal state, and can be handled appropriately by
+// a terminal handler.
+//
+// (A handler for a terminal error state gets to choose whether it stops the
+// whole Runner as a result of the error, or whether it just accepts that
+// that particular T failed, and moves on)
 //
 // The runner can shut down, and it will be either due to an error or not.
 // The first person to shut down the runner gets to decide that. Later errors
@@ -26,7 +31,8 @@
 //
 // (The runner will shut itself down, successfully, once all the T's have
 // reached a terminal state. The runner will also shut itself down,
-// unsuccessfully, if any of the threads or tasks panic)
+// unsuccessfully, if any of the threads or tasks panic, or if a feeder or a
+// terminal handler returns an error Result)
 
 struct RunnerInsideMutex<T> {
     // None: running
@@ -51,7 +57,7 @@ struct RunnerInsideMutex<T> {
     )>,
 
     // Three things need to happen before we can consider ourselves to be done:
-    //   1. the feeder thread has to complete, SUCCESSFULLY (no panicking!)
+    //   1. the feeder thread has to complete, SUCCESSFULLY
     //   2. the queue the feeder thread was filling has to be emptied
     //   3. the number of in-flight objects has to drop to zero
     // Any time any of these three things changes, you should call check_done()
@@ -63,7 +69,7 @@ struct RunnerInsideMutex<T> {
     // If you need it, here's a specially constructed queue writer which will
     // always return an error if you try to enqueue anything onto it.
     //
-    // May you never need it.
+    // (May you never need it.)
     bad_writer: std::sync::Arc<tokio::sync::mpsc::Sender<Box<T>>>,
 }
 
@@ -75,10 +81,10 @@ impl<T> RunnerInsideMutex<T> {
         self.status = Some(Ok(()));
         self.status_event.notify_one();
 
-        // Just shutting down ought to be enough, but for extra safety, we
-        // drop the writers, which will send EOF to the readers.
+        // Drop the writers, which will send EOF to the readers
         self.handlers.clear();
     }
+
     fn shutdown_with_error<E>(&mut self, err: E)
     where
         E: Into<crate::error::WuffError>,
@@ -89,16 +95,17 @@ impl<T> RunnerInsideMutex<T> {
         self.status = Some(Err(err.into()));
         self.status_event.notify_one();
 
-        // Just shutting down ought to be enough, but for extra safety, we
-        // drop the writers, which will send EOF to the readers.
+        // Drop the writers, which will send EOF to the readers
         self.handlers.clear();
     }
+
     fn check_done(&mut self) {
-        if (self.in_flight == 0) && self.feeder_done && self.feed_queue_emptied
+        if self.feeder_done && self.feed_queue_emptied && (self.in_flight == 0)
         {
             self.shutdown_successfully();
         }
     }
+
     // The sorting hat will not block, and is suitable for use in both
     // blocking and async code.
     //
@@ -125,7 +132,7 @@ impl<T> RunnerInsideMutex<T> {
                 if let Err(try_send_err) = writer.try_send(x) {
                     // If it's full, that's fine, let the caller block, If
                     // it's closed, that's also fine, let the caller panic.
-                    // We can't panic here, this is bat country.
+                    // We can't stop here, this is bat country.
                     match try_send_err {
                         tokio::sync::mpsc::error::TrySendError::Full(x) => {
                             return Some((x, std::sync::Arc::clone(&writer)));
@@ -142,13 +149,10 @@ impl<T> RunnerInsideMutex<T> {
                 }
             }
         }
-        panic!("The sorting hat never makes a mistake!");
-    }
 
-    fn check_for_shutdown(&self) {
-        if self.status.is_some() {
-            panic!("runner is shutting down");
-        }
+        // this will poison us, but, well, it's true, the sorting hat doesn't
+        // ever make a mistake!
+        panic!("The sorting hat never makes a mistake!");
     }
 }
 
@@ -195,6 +199,7 @@ impl<T: Send + 'static> Runner<T> {
             std::sync::Arc::new(pred);
         let (writer, mut reader) =
             tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
+
         self.nanny(
             ctx,
             ctx.get_async_spawner().spawn_blocking({
@@ -209,13 +214,15 @@ impl<T: Send + 'static> Runner<T> {
                             ins_mut.write().expect("Runner");
                         if let Err(e) = result {
                             inside_mutex.shutdown_with_error(e);
+                        } else {
+                            inside_mutex.in_flight -= 1;
+                            inside_mutex.check_done();
                         }
-                        inside_mutex.in_flight -= 1;
-                        inside_mutex.check_done();
                     }
                 }
             }),
         );
+
         let mut inside_mutex = self.inside_mutex.write().expect("Runner");
         inside_mutex
             .handlers
@@ -235,6 +242,7 @@ impl<T: Send + 'static> Runner<T> {
             std::sync::Arc::new(pred);
         let (writer, mut reader) =
             tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
+
         self.nanny(
             ctx,
             ctx.get_async_spawner().spawn_blocking({
@@ -256,14 +264,15 @@ impl<T: Send + 'static> Runner<T> {
                         // the predicate.
                         loop {
                             handler(x.as_mut());
+
                             if !pred(x.as_ref()) {
                                 break;
-                            } else {
-                                // we still have to acquire the lock and check
-                                // if we are shutting down...
+                            } else if {
                                 let inside_mutex =
                                     ins_mut.read().expect("Runner");
-                                inside_mutex.check_for_shutdown();
+                                inside_mutex.status.is_some()
+                            } {
+                                panic!("runner is shutting down");
                             }
                         }
 
@@ -279,6 +288,7 @@ impl<T: Send + 'static> Runner<T> {
                 }
             }),
         );
+
         let mut inside_mutex = self.inside_mutex.write().expect("Runner");
         inside_mutex
             .handlers
@@ -355,6 +365,11 @@ impl<T: Send + 'static> Runner<T> {
                         x = handler(x).await;
                         if !pred(x.as_ref()) {
                             break x;
+                        } else if {
+                            let inside_mutex = ins_mut.read().expect("Runner");
+                            inside_mutex.status.is_some()
+                        } {
+                            panic!("runner is shutting down");
                         }
                     }
                 }
@@ -367,12 +382,12 @@ impl<T: Send + 'static> Runner<T> {
             std::sync::Arc::new(crate::util::BoundedParallelism::new(
                 concurrency,
             ));
+
         self.nanny(
             ctx,
             ctx.get_async_spawner().spawn({
                 let ctx: std::sync::Arc<crate::ctx::Ctx> =
                     std::sync::Arc::clone(&ctx);
-                let pred = std::sync::Arc::clone(&pred);
                 let ins_mut: std::sync::Arc<
                     std::sync::RwLock<RunnerInsideMutex<T>>,
                 > = std::sync::Arc::clone(&self.inside_mutex);
@@ -380,7 +395,7 @@ impl<T: Send + 'static> Runner<T> {
                     crate::util::BoundedParallelism<Box<T>>,
                 > = std::sync::Arc::clone(&bp);
                 async move {
-                    while let Some(mut x) = reader.recv().await {
+                    while let Some(x) = reader.recv().await {
                         for res in bp.spawn(&ctx, handler(x)).await {
                             match res {
                                 Ok(x) => {
@@ -408,6 +423,7 @@ impl<T: Send + 'static> Runner<T> {
                 }
             }),
         );
+
         self.nanny(
             ctx,
             ctx.get_async_spawner().spawn({
@@ -424,6 +440,7 @@ impl<T: Send + 'static> Runner<T> {
                             100,
                         ))
                         .await;
+
                         // 2. Check if we're supposed to exit
                         if {
                             let inside_mutex = ins_mut.read().expect("Runner");
@@ -431,6 +448,7 @@ impl<T: Send + 'static> Runner<T> {
                         } {
                             break;
                         }
+
                         // 3. Collect any stragglers
                         for res in bp.collect() {
                             match res {
@@ -459,6 +477,7 @@ impl<T: Send + 'static> Runner<T> {
                 }
             }),
         );
+
         let mut inside_mutex = self.inside_mutex.write().expect("Runner");
         inside_mutex
             .handlers
@@ -479,6 +498,7 @@ impl<T: Send + 'static> Runner<T> {
     {
         let (writer, reader) =
             tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
+
         self.nanny(
             ctx,
             ctx.get_async_spawner().spawn_blocking({
@@ -498,6 +518,7 @@ impl<T: Send + 'static> Runner<T> {
                 }
             }),
         );
+
         self.run(ctx, reader).await
     }
 
@@ -513,6 +534,7 @@ impl<T: Send + 'static> Runner<T> {
     {
         let (writer, reader) =
             tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
+
         self.nanny(
             ctx,
             ctx.get_async_spawner().spawn({
@@ -532,6 +554,7 @@ impl<T: Send + 'static> Runner<T> {
                 }
             }),
         );
+
         self.run(ctx, reader).await
     }
 
@@ -1008,6 +1031,9 @@ impl TestStateMachine {
         }
     }
     async fn handle_nonterminal_async(mut self: Box<Self>) -> Box<Self> {
+        for _ in 0..3 {
+            tokio::time::sleep(std::time::Duration::from_nanos(1)).await;
+        }
         self.advance_state();
         self
     }
@@ -1015,6 +1041,9 @@ impl TestStateMachine {
         if self.id == 5000 {
             panic!("at the disco");
         } else {
+            for _ in 0..3 {
+                tokio::time::sleep(std::time::Duration::from_nanos(1)).await;
+            }
             self.advance_state();
             self
         }
@@ -1072,9 +1101,9 @@ impl TestStateMachine {
 fn test_runner_success_with_blocking_feeder() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
-        let mgr = TestStateMachineManager::new(100000);
-        let mut runner: Runner<TestStateMachine> = Runner::new(1000);
-        mgr.install_for_success(&ctx, &mut runner, 100);
+        let mgr = TestStateMachineManager::new(10000);
+        let mut runner: Runner<TestStateMachine> = Runner::new(100);
+        mgr.install_for_success(&ctx, &mut runner, 10);
         runner
             .run_blocking(&ctx, {
                 let mgr = std::sync::Arc::clone(&mgr);
@@ -1107,9 +1136,9 @@ fn test_runner_success_with_blocking_feeder() {
 fn test_runner_success_with_async_feeder() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
-        let mgr = TestStateMachineManager::new(100000);
-        let mut runner: Runner<TestStateMachine> = Runner::new(1000);
-        mgr.install_for_success(&ctx, &mut runner, 100);
+        let mgr = TestStateMachineManager::new(10000);
+        let mut runner: Runner<TestStateMachine> = Runner::new(100);
+        mgr.install_for_success(&ctx, &mut runner, 10);
         runner
             .run_async(&ctx, {
                 let mgr = std::sync::Arc::clone(&mgr);
