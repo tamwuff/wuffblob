@@ -153,14 +153,16 @@ impl<T> RunnerInsideMutex<T> {
 }
 
 pub struct Runner<T> {
+    queue_size: usize,
     inside_mutex: std::sync::Arc<std::sync::RwLock<RunnerInsideMutex<T>>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl<T: Send + 'static> Runner<T> {
-    pub fn new() -> Runner<T> {
+    pub fn new(queue_size: usize) -> Runner<T> {
         let (bad_writer, _) = tokio::sync::mpsc::channel::<Box<T>>(1);
         Runner {
+            queue_size: queue_size,
             inside_mutex: std::sync::Arc::new(std::sync::RwLock::new(
                 RunnerInsideMutex {
                     status: None,
@@ -191,7 +193,8 @@ impl<T: Send + 'static> Runner<T> {
     {
         let pred: std::sync::Arc<dyn Fn(&T) -> bool + Send + Sync> =
             std::sync::Arc::new(pred);
-        let (writer, mut reader) = tokio::sync::mpsc::channel::<Box<T>>(1000);
+        let (writer, mut reader) =
+            tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
         self.nanny(
             ctx,
             ctx.get_async_spawner().spawn_blocking({
@@ -230,7 +233,8 @@ impl<T: Send + 'static> Runner<T> {
     {
         let pred: std::sync::Arc<dyn Fn(&T) -> bool + Send + Sync> =
             std::sync::Arc::new(pred);
-        let (writer, mut reader) = tokio::sync::mpsc::channel::<Box<T>>(1000);
+        let (writer, mut reader) =
+            tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
         self.nanny(
             ctx,
             ctx.get_async_spawner().spawn_blocking({
@@ -357,7 +361,8 @@ impl<T: Send + 'static> Runner<T> {
             }
         };
 
-        let (writer, mut reader) = tokio::sync::mpsc::channel::<Box<T>>(1000);
+        let (writer, mut reader) =
+            tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
         let bp: std::sync::Arc<crate::util::BoundedParallelism<Box<T>>> =
             std::sync::Arc::new(crate::util::BoundedParallelism::new(
                 concurrency,
@@ -466,9 +471,14 @@ impl<T: Send + 'static> Runner<T> {
         feeder: F,
     ) -> Result<(), crate::error::WuffError>
     where
-        F: FnOnce(tokio::sync::mpsc::Sender<Box<T>>) + Send + 'static,
+        F: FnOnce(
+                tokio::sync::mpsc::Sender<Box<T>>,
+            ) -> Result<(), crate::error::WuffError>
+            + Send
+            + 'static,
     {
-        let (writer, reader) = tokio::sync::mpsc::channel::<Box<T>>(1000);
+        let (writer, reader) =
+            tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
         self.nanny(
             ctx,
             ctx.get_async_spawner().spawn_blocking({
@@ -476,10 +486,15 @@ impl<T: Send + 'static> Runner<T> {
                     std::sync::RwLock<RunnerInsideMutex<T>>,
                 > = std::sync::Arc::clone(&self.inside_mutex);
                 move || {
-                    feeder(writer);
+                    let result: Result<(), crate::error::WuffError> =
+                        feeder(writer);
                     let mut inside_mutex = ins_mut.write().expect("Runner");
-                    inside_mutex.feeder_done = true;
-                    inside_mutex.check_done();
+                    if let Err(err) = result {
+                        inside_mutex.shutdown_with_error(err);
+                    } else {
+                        inside_mutex.feeder_done = true;
+                        inside_mutex.check_done();
+                    }
                 }
             }),
         );
@@ -493,9 +508,11 @@ impl<T: Send + 'static> Runner<T> {
     ) -> Result<(), crate::error::WuffError>
     where
         F: FnOnce(tokio::sync::mpsc::Sender<Box<T>>) -> FF + Send + 'static,
-        FF: std::future::Future<Output = ()> + Send,
+        FF: std::future::Future<Output = Result<(), crate::error::WuffError>>
+            + Send,
     {
-        let (writer, reader) = tokio::sync::mpsc::channel::<Box<T>>(1000);
+        let (writer, reader) =
+            tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
         self.nanny(
             ctx,
             ctx.get_async_spawner().spawn({
@@ -503,10 +520,15 @@ impl<T: Send + 'static> Runner<T> {
                     std::sync::RwLock<RunnerInsideMutex<T>>,
                 > = std::sync::Arc::clone(&self.inside_mutex);
                 async move {
-                    feeder(writer).await;
+                    let result: Result<(), crate::error::WuffError> =
+                        feeder(writer).await;
                     let mut inside_mutex = ins_mut.write().expect("Runner");
-                    inside_mutex.feeder_done = true;
-                    inside_mutex.check_done();
+                    if let Err(err) = result {
+                        inside_mutex.shutdown_with_error(err);
+                    } else {
+                        inside_mutex.feeder_done = true;
+                        inside_mutex.check_done();
+                    }
                 }
             }),
         );
@@ -856,7 +878,7 @@ impl TestStateMachineManager {
     fn rand_feeder_blocking(
         self: std::sync::Arc<Self>,
         writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>,
-    ) {
+    ) -> Result<(), crate::error::WuffError> {
         let mut rng: rand::rngs::ThreadRng = rand::thread_rng();
         for i in 0usize..self.num {
             writer
@@ -867,12 +889,13 @@ impl TestStateMachineManager {
                 }))
                 .unwrap();
         }
+        Ok(())
     }
 
     async fn rand_feeder_async(
         self: std::sync::Arc<Self>,
         writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>,
-    ) {
+    ) -> Result<(), crate::error::WuffError> {
         for i in 0usize..self.num {
             // rand::rngs::ThreadRng is not Send, and it can't be held across
             // an await. That means we have to get all the randomness we need,
@@ -890,12 +913,13 @@ impl TestStateMachineManager {
                 .await
                 .unwrap();
         }
+        Ok(())
     }
 
-    fn deterministic_feeder(
+    fn deterministic_feeder_blocking(
         self: std::sync::Arc<Self>,
         writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>,
-    ) {
+    ) -> Result<(), crate::error::WuffError> {
         for i in 0usize..self.num {
             writer
                 .blocking_send(Box::new(TestStateMachine {
@@ -905,6 +929,40 @@ impl TestStateMachineManager {
                 }))
                 .unwrap();
         }
+        Ok(())
+    }
+
+    fn deterministic_feeder_blocking_ERR(
+        self: std::sync::Arc<Self>,
+        writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>,
+    ) -> Result<(), crate::error::WuffError> {
+        for i in 0usize..self.num {
+            writer
+                .blocking_send(Box::new(TestStateMachine {
+                    id: i,
+                    state: 0xffu8,
+                    mgr: std::sync::Arc::clone(&self),
+                }))
+                .unwrap();
+        }
+        Err("Snyarf, snyarf, snyarf!".into())
+    }
+
+    async fn deterministic_feeder_async_ERR(
+        self: std::sync::Arc<Self>,
+        writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>,
+    ) -> Result<(), crate::error::WuffError> {
+        for i in 0usize..self.num {
+            writer
+                .send(Box::new(TestStateMachine {
+                    id: i,
+                    state: 0xffu8,
+                    mgr: std::sync::Arc::clone(&self),
+                }))
+                .await
+                .unwrap();
+        }
+        Err("Snyarf, snyarf, snyarf!".into())
     }
 }
 
@@ -1015,16 +1073,14 @@ fn test_runner_success_with_blocking_feeder() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(100000);
-        let mut runner: Runner<TestStateMachine> = Runner::new();
+        let mut runner: Runner<TestStateMachine> = Runner::new(1000);
         mgr.install_for_success(&ctx, &mut runner, 100);
         runner
             .run_blocking(&ctx, {
                 let mgr = std::sync::Arc::clone(&mgr);
                 move |writer: tokio::sync::mpsc::Sender<
                     Box<TestStateMachine>,
-                >| {
-                    mgr.rand_feeder_blocking(writer);
-                }
+                >| { mgr.rand_feeder_blocking(writer) }
             })
             .await
             .expect("should have succeeded");
@@ -1052,7 +1108,7 @@ fn test_runner_success_with_async_feeder() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(100000);
-        let mut runner: Runner<TestStateMachine> = Runner::new();
+        let mut runner: Runner<TestStateMachine> = Runner::new(1000);
         mgr.install_for_success(&ctx, &mut runner, 100);
         runner
             .run_async(&ctx, {
@@ -1087,15 +1143,16 @@ fn test_runner_with_panic_in_blocking_handler() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(10000);
-        let mut runner: Runner<TestStateMachine> = Runner::new();
-        mgr.install_with_one_blocking_that_panics(&ctx, &mut runner, 100);
+        let mut runner: Runner<TestStateMachine> = Runner::new(100);
+        mgr.install_with_one_blocking_that_panics(&ctx, &mut runner, 10);
         let result = runner
             .run_blocking(&ctx, {
                 let mgr = std::sync::Arc::clone(&mgr);
                 move |writer: tokio::sync::mpsc::Sender<
                     Box<TestStateMachine>,
-                >| {
-                    mgr.deterministic_feeder(writer);
+                >|
+                      -> Result<(), crate::error::WuffError> {
+                    mgr.deterministic_feeder_blocking(writer)
                 }
             })
             .await;
@@ -1119,15 +1176,16 @@ fn test_runner_with_panic_in_async_handler() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(10000);
-        let mut runner: Runner<TestStateMachine> = Runner::new();
-        mgr.install_with_one_async_that_panics(&ctx, &mut runner, 100);
+        let mut runner: Runner<TestStateMachine> = Runner::new(100);
+        mgr.install_with_one_async_that_panics(&ctx, &mut runner, 10);
         let result = runner
             .run_blocking(&ctx, {
                 let mgr = std::sync::Arc::clone(&mgr);
                 move |writer: tokio::sync::mpsc::Sender<
                     Box<TestStateMachine>,
-                >| {
-                    mgr.deterministic_feeder(writer);
+                >|
+                      -> Result<(), crate::error::WuffError> {
+                    mgr.deterministic_feeder_blocking(writer)
                 }
             })
             .await;
@@ -1151,15 +1209,81 @@ fn test_runner_with_err_in_terminal_handler() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(10000);
-        let mut runner: Runner<TestStateMachine> = Runner::new();
-        mgr.install_with_terminal_that_errors(&ctx, &mut runner, 100);
+        let mut runner: Runner<TestStateMachine> = Runner::new(100);
+        mgr.install_with_terminal_that_errors(&ctx, &mut runner, 10);
         let result = runner
             .run_blocking(&ctx, {
                 let mgr = std::sync::Arc::clone(&mgr);
                 move |writer: tokio::sync::mpsc::Sender<
                     Box<TestStateMachine>,
+                >|
+                      -> Result<(), crate::error::WuffError> {
+                    mgr.deterministic_feeder_blocking(writer)
+                }
+            })
+            .await;
+        assert!(result.is_err());
+        let done = mgr.done.lock().unwrap();
+        let mut total: u16 = 0;
+        for x in std::ops::Deref::deref(&done) {
+            if *x {
+                total += 1;
+            }
+        }
+        println!("Ran {} state machines", done.len());
+        println!("{} finished before error", total);
+        Ok(())
+    })
+    .expect("unexpected error");
+}
+
+#[test]
+fn test_runner_with_err_in_blocking_feeder() {
+    let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
+    ctx.run_async_main(async {
+        let mgr = TestStateMachineManager::new(10000);
+        let mut runner: Runner<TestStateMachine> = Runner::new(100);
+        mgr.install_for_success(&ctx, &mut runner, 10);
+        let result = runner
+            .run_blocking(&ctx, {
+                let mgr = std::sync::Arc::clone(&mgr);
+                move |writer: tokio::sync::mpsc::Sender<
+                    Box<TestStateMachine>,
+                >|
+                      -> Result<(), crate::error::WuffError> {
+                    mgr.deterministic_feeder_blocking_ERR(writer)
+                }
+            })
+            .await;
+        assert!(result.is_err());
+        let done = mgr.done.lock().unwrap();
+        let mut total: u16 = 0;
+        for x in std::ops::Deref::deref(&done) {
+            if *x {
+                total += 1;
+            }
+        }
+        println!("Ran {} state machines", done.len());
+        println!("{} finished before error", total);
+        Ok(())
+    })
+    .expect("unexpected error");
+}
+
+#[test]
+fn test_runner_with_err_in_async_feeder() {
+    let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
+    ctx.run_async_main(async {
+        let mgr = TestStateMachineManager::new(10000);
+        let mut runner: Runner<TestStateMachine> = Runner::new(100);
+        mgr.install_for_success(&ctx, &mut runner, 10);
+        let result = runner
+            .run_async(&ctx, {
+                let mgr = std::sync::Arc::clone(&mgr);
+                move |writer: tokio::sync::mpsc::Sender<
+                    Box<TestStateMachine>,
                 >| {
-                    mgr.deterministic_feeder(writer);
+                    mgr.deterministic_feeder_async_ERR(writer)
                 }
             })
             .await;
