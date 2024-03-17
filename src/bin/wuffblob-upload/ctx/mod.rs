@@ -4,7 +4,6 @@ pub struct Stats {
     pub bytes_found: u64,
     pub files_queried_in_cloud: u64,
     pub done_listing: bool,
-    pub done_querying: bool,
     pub files_need_hashing_locally: u64,
     pub bytes_need_hashing_locally: u64,
     pub files_completed_hashing_locally: u64,
@@ -26,7 +25,6 @@ impl Stats {
             bytes_found: 0u64,
             files_queried_in_cloud: 0u64,
             done_listing: false,
-            done_querying: false,
             files_need_hashing_locally: 0u64,
             bytes_need_hashing_locally: 0u64,
             files_completed_hashing_locally: 0u64,
@@ -96,18 +94,18 @@ pub fn siginfo_handler(ctx: &std::sync::Arc<Ctx>) {
 
     let mut s: String = String::new();
     s.push_str("\n\n");
-    if stats.done_querying {
-        assert!(stats.done_listing);
-        assert_eq!(stats.files_found, stats.files_queried_in_cloud);
-        s.push_str(&format!(
-            "{} files and directories (final count)\n",
-            stats.files_found
-        ));
-    } else if stats.done_listing {
-        s.push_str(&format!(
-            "Queried {} out of {} files and directories\n",
-            stats.files_queried_in_cloud, stats.files_found
-        ));
+    if stats.done_listing {
+        if stats.files_queried_in_cloud == stats.files_found {
+            s.push_str(&format!(
+                "{} files and directories (final count)\n",
+                stats.files_found
+            ));
+        } else {
+            s.push_str(&format!(
+                "Queried {} out of {} files and directories\n",
+                stats.files_queried_in_cloud, stats.files_found
+            ));
+        }
     } else {
         s.push_str(&format!(
             "Queried {} out of {} found so far (list not yet complete)\n",

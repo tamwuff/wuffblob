@@ -36,11 +36,19 @@ impl AzureClient {
     }
 }
 
-#[derive(Debug)]
 struct FileForUploadInsideMutex {
     f: std::fs::File,
     off: u64,
     bph: crate::bph::BulletproofHasher,
+    mark_progress: std::sync::Arc<dyn Fn(u64) + Send + Sync>,
+}
+
+// I never wanted to impl Debug anyway, but SeekableStream requires it. And I
+// can't #[derive(Debug)] because of the closure...
+impl std::fmt::Debug for FileForUploadInsideMutex {
+    fn fmt(&self, _f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        Ok(())
+    }
 }
 
 impl FileForUploadInsideMutex {
@@ -121,6 +129,11 @@ impl futures::io::AsyncRead for FileChunkForUpload {
         );
 
         let off: u64 = inside_mutex.off;
+
+        // If they're asking for bytes 1000-1200, it seems like a decent
+        // assumption that they've already sent up to offset 1000.
+        (inside_mutex.mark_progress)(off);
+
         debug_assert!(off >= self.off_start);
         debug_assert!(off <= self.off_end);
         if (buf.len() as u64) > (self.off_end - off) {
@@ -168,7 +181,11 @@ pub struct FileForUpload {
 }
 
 impl FileForUpload {
-    pub fn new(mut f: std::fs::File, metadata: &std::fs::Metadata) -> Self {
+    pub fn new(
+        mut f: std::fs::File,
+        metadata: &std::fs::Metadata,
+        mark_progress: std::sync::Arc<dyn Fn(u64) + Send + Sync>,
+    ) -> Self {
         let off: u64 =
             std::io::Seek::stream_position(&mut f).expect("lseek()");
 
@@ -178,6 +195,7 @@ impl FileForUpload {
                     f: f,
                     off: off,
                     bph: crate::bph::BulletproofHasher::new(),
+                    mark_progress: mark_progress,
                 },
             )),
             len: metadata.len(),
@@ -345,6 +363,19 @@ fn read_three_chunks_in_all_kinds_of_wild_and_crazy_ways() {
         0xcau8, 0x06u8, 0x0bu8, 0x4cu8, 0x39u8, 0x47u8, 0x98u8, 0x39u8,
     ];
 
+    let reported_progress =
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let get_reported_progress = {
+        let reported_progress = std::sync::Arc::clone(&reported_progress);
+        move || reported_progress.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let set_reported_progress = {
+        let reported_progress = std::sync::Arc::clone(&reported_progress);
+        move |val: u64| {
+            reported_progress.store(val, std::sync::atomic::Ordering::Relaxed);
+        }
+    };
+
     // We have a file that is 13 bytes long, in total.
     //
     // That will be divided into 3 chunks of 5 bytes each, with the last chunk
@@ -355,7 +386,11 @@ fn read_three_chunks_in_all_kinds_of_wild_and_crazy_ways() {
     let mut f = {
         let f = crate::util::temp_local_file("Hello, world!");
         let metadata = f.metadata().unwrap();
-        FileForUpload::new(f, &metadata)
+        FileForUpload::new(
+            f,
+            &metadata,
+            std::sync::Arc::new(set_reported_progress),
+        )
     };
     f.set_blob_block_size(5);
 
@@ -399,17 +434,20 @@ fn read_three_chunks_in_all_kinds_of_wild_and_crazy_ways() {
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 3);
                 assert_eq!(&buf[..3], "Hel".as_bytes());
+                assert_eq!(get_reported_progress(), 0);
 
                 result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
                     .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 2);
                 assert_eq!(&buf[..2], "lo".as_bytes());
+                assert_eq!(get_reported_progress(), 3);
 
                 result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
                     .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 0);
+                assert_eq!(get_reported_progress(), 5);
             }
 
             //////////////////////
@@ -446,17 +484,20 @@ fn read_three_chunks_in_all_kinds_of_wild_and_crazy_ways() {
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 3);
                 assert_eq!(&buf[..3], ", w".as_bytes());
+                assert_eq!(get_reported_progress(), 5);
 
                 result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
                     .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 2);
                 assert_eq!(&buf[..2], "or".as_bytes());
+                assert_eq!(get_reported_progress(), 8);
 
                 result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
                     .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 0);
+                assert_eq!(get_reported_progress(), 10);
             }
 
             /////////////////////
@@ -484,11 +525,13 @@ fn read_three_chunks_in_all_kinds_of_wild_and_crazy_ways() {
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 3);
                 assert_eq!(&buf[..3], "ld!".as_bytes());
+                assert_eq!(get_reported_progress(), 10);
 
                 result = futures::io::AsyncReadExt::read(&mut chunk, &mut buf)
                     .await;
                 assert!(result.is_ok());
                 assert_eq!(result.unwrap(), 0);
+                assert_eq!(get_reported_progress(), 13);
             }
 
             // Now we should be able to get the hash.

@@ -46,6 +46,10 @@ fn feed(
         let metadata: std::fs::Metadata = maybe_metadata.unwrap();
         let file_type: std::fs::FileType = metadata.file_type();
         if file_type.is_file() {
+            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                stats.files_found += 1;
+                stats.bytes_found += metadata.len();
+            });
             writer
                 .blocking_send(Box::new(crate::state_machine::Uploader::new(
                     &ctx,
@@ -105,6 +109,10 @@ fn feed(
             // kick it out if it's a symlink that is pointing to a directory.
             let file_type: std::fs::FileType = new_metadata.file_type();
             if file_type.is_file() {
+                ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                    stats.files_found += 1;
+                    stats.bytes_found += new_metadata.len();
+                });
                 writer
                     .blocking_send(Box::new(
                         crate::state_machine::Uploader::new(
@@ -143,6 +151,9 @@ fn feed(
             // It had better be a directory...!
             let file_type: std::fs::FileType = metadata.file_type();
             if file_type.is_dir() {
+                ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                    stats.files_found += 1;
+                });
                 writer
                     .blocking_send(Box::new(
                         crate::state_machine::Uploader::new(
@@ -226,6 +237,32 @@ async fn do_metadata(
                     }
                 }
             }
+            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                stats.files_queried_in_cloud += 1;
+            });
+
+            match uploader.state {
+                crate::state_machine::UploaderState::Hash => {
+                    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                        stats.files_need_hashing_locally += 1;
+                        stats.bytes_need_hashing_locally +=
+                            uploader.local_metadata.len();
+                    });
+                }
+                crate::state_machine::UploaderState::Upload(_) => {
+                    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                        stats.files_need_upload += 1;
+                        stats.bytes_need_upload +=
+                            uploader.local_metadata.len();
+                    });
+                }
+                crate::state_machine::UploaderState::Mkdir => {
+                    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                        stats.files_need_upload += 1;
+                    });
+                }
+                _ => {}
+            }
         }
         crate::state_machine::UploaderState::Mkdir => {
             let dir_client: azure_storage_datalake::clients::DirectoryClient =
@@ -245,6 +282,10 @@ async fn do_metadata(
                 .await;
             // We always tell the uploader that it worked. What else can we do?
             uploader.mkdir_succeeded(&ctx);
+            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                stats.files_uploaded += 1;
+                stats.files_verified += 1;
+            });
         }
         _ => {
             panic!("wrong state");
@@ -302,6 +343,9 @@ fn do_hash(
             stats.bytes_completed_hashing_locally += buf.len() as u64;
         });
     }
+    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+        stats.files_completed_hashing_locally += 1;
+    });
     uploader.provide_hash(
         ctx,
         <md5::Md5 as md5::Digest>::finalize(hasher)
@@ -309,6 +353,23 @@ fn do_hash(
             .try_into()
             .unwrap(),
     );
+
+    match uploader.state {
+        crate::state_machine::UploaderState::Ok => {
+            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                stats.files_can_reuse += 1;
+                stats.bytes_can_reuse += uploader.local_metadata.len();
+            });
+        }
+
+        crate::state_machine::UploaderState::Upload(_) => {
+            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                stats.files_need_upload += 1;
+                stats.bytes_need_upload += uploader.local_metadata.len();
+            });
+        }
+        _ => {}
+    }
 }
 
 async fn do_upload(
@@ -331,12 +392,29 @@ async fn do_upload(
         .container_client
         .blob_client(maybe_filename_as_string.unwrap());
 
+    let mark_progress: std::sync::Arc<dyn Fn(u64) + Send + Sync> =
+        std::sync::Arc::new({
+            let ctx: std::sync::Arc<crate::ctx::Ctx> =
+                std::sync::Arc::clone(&ctx);
+            let progress: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            move |new_val: u64| {
+                let old_val: u64 = progress
+                    .swap(new_val, std::sync::atomic::Ordering::Relaxed);
+                ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                    stats.bytes_uploaded -= old_val;
+                    stats.bytes_uploaded += new_val;
+                });
+            }
+        });
+
     // Make sure we can open our local file, before we delete the one in Azure
     let f: wuffblob::azure::FileForUpload =
         match std::fs::File::open(&uploader.local_path) {
             Ok(f) => wuffblob::azure::FileForUpload::new(
                 f,
                 &uploader.local_metadata,
+                std::sync::Arc::clone(&mark_progress),
             ),
             Err(e) => {
                 uploader
@@ -399,6 +477,10 @@ async fn do_upload(
         return uploader;
     }
     uploader.upload_succeeded(&ctx, hash);
+    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+        stats.files_uploaded += 1;
+    });
+    mark_progress(uploader.local_metadata.len());
 
     uploader
 }
@@ -449,7 +531,7 @@ async fn do_verify(
                             num_bytes_hashed += buf_len as u64;
                             ctx.mutate_stats(
                                 |stats: &mut crate::ctx::Stats| {
-                                    //stats.hash_bytes_complete += buf_len as u64;
+                                    stats.bytes_verified += buf_len as u64;
                                 },
                             );
                         }
@@ -457,13 +539,6 @@ async fn do_verify(
                             uploader.verify_failed(
                                 &ctx,
                                 &wuffblob::error::WuffError::from(err),
-                            );
-                            ctx.mutate_stats(
-                                |stats: &mut crate::ctx::Stats| {
-                                    //stats.hash_bytes_complete -= num_bytes_hashed;
-                                    //stats.hash_required -= 1u64;
-                                    //stats.hash_bytes_required -= expected_len;
-                                },
                             );
                             return uploader;
                         }
@@ -475,11 +550,6 @@ async fn do_verify(
                     &ctx,
                     &wuffblob::error::WuffError::from(err),
                 );
-                ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
-                    //stats.hash_bytes_complete -= num_bytes_hashed;
-                    //stats.hash_required -= 1u64;
-                    //stats.hash_bytes_required -= expected_len;
-                });
                 return uploader;
             }
         }
@@ -492,11 +562,6 @@ async fn do_verify(
                 expected_len, num_bytes_hashed
             )),
         );
-        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
-            //stats.hash_bytes_complete -= num_bytes_hashed;
-            //stats.hash_required -= 1u64;
-            //stats.hash_bytes_required -= expected_len;
-        });
         return uploader;
     }
     uploader.verify_succeeded(
@@ -506,9 +571,12 @@ async fn do_verify(
             .try_into()
             .unwrap(),
     );
-    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
-        //stats.hash_complete += 1;
-    });
+
+    if let crate::state_machine::UploaderState::Ok = uploader.state {
+        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+            stats.files_verified += 1;
+        });
+    }
 
     uploader
 }
