@@ -109,7 +109,7 @@ fn multi_pass() {
     hasher.update(0, b"Hel");
 
     // 4 - 9, should be ignored
-    hasher.update(4, b"o, wo");
+    hasher.update(4, b"o, wo"); // uwu
 
     // 3 - 7
     hasher.update(3, b"lo, ");

@@ -263,6 +263,24 @@ impl TryFrom<&std::path::Path> for WuffPath {
     }
 }
 
+impl From<&WuffPath> for std::path::PathBuf {
+    fn from(wuffpath: &WuffPath) -> std::path::PathBuf {
+        let mut path: std::path::PathBuf = if (wuffpath.components.len() > 1)
+            && wuffpath.components[0].is_empty()
+        {
+            std::path::MAIN_SEPARATOR_STR.into()
+        } else {
+            std::path::PathBuf::new()
+        };
+        for component in &wuffpath.components {
+            if !component.is_empty() {
+                path.push(component);
+            }
+        }
+        path
+    }
+}
+
 impl std::fmt::Display for WuffPath {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         let s: std::ffi::OsString = self.to_osstring();
@@ -350,6 +368,77 @@ fn two_components_ending_with_slash() {
     assert_eq!(
         p.to_osstring(),
         Into::<std::ffi::OsString>::into(String::from("foo/bar/"))
+    );
+}
+
+#[test]
+fn componentless_wuffpath_to_path() {
+    let wp = WuffPath::new();
+    let p: std::path::PathBuf = (&wp).into();
+    assert_eq!(p, std::path::Path::new(""));
+}
+
+#[test]
+fn empty_wuffpath_to_path() {
+    let wp: WuffPath = "".into();
+    let p: std::path::PathBuf = (&wp).into();
+    assert_eq!(p, std::path::Path::new(""));
+}
+
+#[test]
+fn wuffpath_with_two_components_to_path() {
+    let wp: WuffPath = "foo/bar".into();
+    let p: std::path::PathBuf = (&wp).into();
+    let mut expected: std::path::PathBuf = "foo".into();
+    expected.push("bar");
+    assert_eq!(p, expected);
+}
+
+#[test]
+fn wuffpath_starting_with_slash_to_path() {
+    let wp: WuffPath = "/foo/bar".into();
+    let p: std::path::PathBuf = (&wp).into();
+    let mut expected: std::path::PathBuf =
+        std::path::MAIN_SEPARATOR_STR.into();
+    expected.push("foo");
+    expected.push("bar");
+    assert_eq!(p, std::path::Path::new("/foo/bar"));
+}
+
+#[test]
+fn empty_path_turns_into_componentless_wuffpath() {
+    let p = std::path::Path::new("");
+    let wp: WuffPath = p.try_into().unwrap();
+    assert!(wp.is_componentless());
+}
+
+#[test]
+fn path_with_two_components_to_wuffpath() {
+    let mut p: std::path::PathBuf = "foo".into();
+    p.push("bar");
+    let wp: WuffPath = p.as_path().try_into().unwrap();
+    assert_eq!(
+        wp.components,
+        vec!(
+            Into::<std::ffi::OsString>::into(String::from("foo")),
+            Into::<std::ffi::OsString>::into(String::from("bar"))
+        )
+    );
+}
+
+#[test]
+fn absolute_path_to_wuffpath() {
+    let mut p: std::path::PathBuf = std::path::MAIN_SEPARATOR_STR.into();
+    p.push("foo");
+    p.push("bar");
+    let wp: WuffPath = p.as_path().try_into().unwrap();
+    assert_eq!(
+        wp.components,
+        vec!(
+            std::ffi::OsString::new(),
+            Into::<std::ffi::OsString>::into(String::from("foo")),
+            Into::<std::ffi::OsString>::into(String::from("bar"))
+        )
     );
 }
 

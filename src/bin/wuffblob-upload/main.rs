@@ -398,12 +398,11 @@ async fn do_upload(
                 std::sync::Arc::clone(&ctx);
             let progress: std::sync::atomic::AtomicU64 =
                 std::sync::atomic::AtomicU64::new(0);
-            move |new_val: u64| {
-                let old_val: u64 = progress
-                    .swap(new_val, std::sync::atomic::Ordering::Relaxed);
+            move |val: u64| {
                 ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
-                    stats.bytes_uploaded -= old_val;
-                    stats.bytes_uploaded += new_val;
+                    stats.bytes_uploaded -= progress
+                        .swap(val, std::sync::atomic::Ordering::Relaxed);
+                    stats.bytes_uploaded += val;
                 });
             }
         });
@@ -781,7 +780,10 @@ fn main() -> Result<(), wuffblob::error::WuffError> {
             }
         }
 
-        // make sure there's no overlap
+        // make sure there's no overlap on the destination side. It's OK to
+        // have overlap on the source side since that just means the same
+        // data is going to two different locations. But overlap on the
+        // destination side means they conflict with each other.
         let mut paths: Vec<&wuffblob::path::WuffPath> =
             Vec::with_capacity(to_upload.len());
         for (_, path) in &to_upload {
