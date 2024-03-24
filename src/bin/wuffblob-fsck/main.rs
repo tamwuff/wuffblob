@@ -182,33 +182,32 @@ fn do_ui(
     };
     let name: std::ffi::OsString = checker.path.to_osstring();
     let _ui_lock = ctx.user_interaction.lock();
-    print!("{:?}: {}", name, proposed_repair.problem_statement);
     if ctx.base_ctx.dry_run {
+        print!("{:?}: {}", name, proposed_repair.problem_statement);
         print!("\n{}? no\n\n", proposed_repair.question);
         checker.provide_user_input(&ctx, false);
     } else if ctx.preen {
+        print!("{:?}: {}", name, proposed_repair.problem_statement);
         println!(" ({})", proposed_repair.action);
         checker.provide_user_input(&ctx, true);
     } else if ctx.yes {
+        print!("{:?}: {}", name, proposed_repair.problem_statement);
         print!("\n{}? yes\n\n", proposed_repair.question);
         checker.provide_user_input(&ctx, true);
     } else {
-        print!("\n{}? [yn] ", proposed_repair.question);
-        std::io::Write::flush(&mut std::io::stdout().lock()).expect("stdout");
         let answer: bool = loop {
+            print!("{:?}: {}", name, proposed_repair.problem_statement);
+            print!("\n{}? [yn] ", proposed_repair.question);
+            std::io::Write::flush(&mut std::io::stdout().lock())
+                .expect("stdout");
             let mut s = String::new();
-            if let Ok(_) = std::io::BufRead::read_line(
-                &mut std::io::stdin().lock(),
-                &mut s,
-            ) {
-                s = String::from(s.trim());
-                if s.eq_ignore_ascii_case("y") {
-                    break true;
-                } else if s.eq_ignore_ascii_case("n") {
-                    break false;
-                }
-            } else {
-                return;
+            std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut s)
+                .expect("stdin");
+            s = String::from(s.trim());
+            if s.eq_ignore_ascii_case("y") {
+                break true;
+            } else if s.eq_ignore_ascii_case("n") {
+                break false;
             }
         };
         checker.provide_user_input(&ctx, answer);

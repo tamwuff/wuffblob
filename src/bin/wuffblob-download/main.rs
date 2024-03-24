@@ -127,7 +127,7 @@ async fn feed(
                     let one_remote_path =
                         wuffblob::path::WuffPath::from_osstr(std::ffi::OsStr::new(&blob.name));
                     if !one_remote_path.is_canonical() {
-                        return Err(format!("{}: path is not canonical", &remote_path).into());
+                        return Err(format!("{}: path is not canonical", &one_remote_path).into());
                     }
                     let one_local_path =
                         one_remote_path.merge_into_os_path(&remote_path, &local_path)?;

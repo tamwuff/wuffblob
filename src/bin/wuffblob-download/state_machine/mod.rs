@@ -251,13 +251,7 @@ impl Downloader {
         if let Some((conflicting_remote_path, conflicting_local_path)) =
             conflict
         {
-            self.set_state_to_local_error(
-                ctx,
-                format!(
-                    "cannot download {} to {:?} because download of {} to {:?} already in progress, and they are the same file",
-                    &self.remote_path, &self.local_path, &conflicting_remote_path, &conflicting_local_path
-                ),
-            );
+            self.set_state_to_local_error(ctx, format!("cannot download {} to {:?} because download of {} to {:?} already in progress, and they are the same file", &self.remote_path, &self.local_path, &conflicting_remote_path, &conflicting_local_path));
         }
     }
 
