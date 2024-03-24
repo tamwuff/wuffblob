@@ -71,6 +71,7 @@ pub struct Ctx {
             (wuffblob::path::WuffPath, std::path::PathBuf),
         >,
     >,
+    pub local_io_bound_operations: std::sync::Mutex<()>,
 }
 
 impl Ctx {
@@ -85,6 +86,7 @@ impl Ctx {
             to_download: to_download,
             stats: std::sync::Mutex::new(crate::ctx::Stats::new()),
             in_flight: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            local_io_bound_operations: std::sync::Mutex::new(()),
         })
     }
 
@@ -96,6 +98,7 @@ impl Ctx {
             to_download: vec![(to_path.into(), from_path.into())],
             stats: std::sync::Mutex::new(crate::ctx::Stats::new()),
             in_flight: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            local_io_bound_operations: std::sync::Mutex::new(()),
         }
     }
 

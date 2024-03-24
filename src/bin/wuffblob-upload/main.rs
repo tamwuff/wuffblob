@@ -183,32 +183,34 @@ async fn do_metadata(
     ctx: std::sync::Arc<crate::ctx::Ctx>,
     mut uploader: Box<crate::state_machine::Uploader>,
 ) -> Box<crate::state_machine::Uploader> {
-    let maybe_filename_as_string: Result<String, std::ffi::OsString> =
-        uploader.remote_path.to_osstring().into_string();
-    if maybe_filename_as_string.is_err() {
-        match uploader.state {
-            crate::state_machine::UploaderState::GetRemoteMetadata => {
-                uploader.get_remote_metadata_failed(
-                    &ctx,
-                    &wuffblob::error::WuffError::from(
-                        "path is not valid unicode",
-                    ),
-                );
+    let filename_as_string: String =
+        match uploader.remote_path.to_osstring().into_string() {
+            Ok(s) => s,
+            Err(_) => {
+                match uploader.state {
+                    crate::state_machine::UploaderState::GetRemoteMetadata => {
+                        uploader.get_remote_metadata_failed(
+                            &ctx,
+                            &wuffblob::error::WuffError::from(
+                                "path is not valid unicode",
+                            ),
+                        );
+                    }
+                    crate::state_machine::UploaderState::Mkdir => {
+                        uploader.mkdir_failed(
+                            &ctx,
+                            &wuffblob::error::WuffError::from(
+                                "path is not valid unicode",
+                            ),
+                        );
+                    }
+                    _ => {
+                        panic!("wrong state");
+                    }
+                }
+                return uploader;
             }
-            crate::state_machine::UploaderState::Mkdir => {
-                uploader.mkdir_failed(
-                    &ctx,
-                    &wuffblob::error::WuffError::from(
-                        "path is not valid unicode",
-                    ),
-                );
-            }
-            _ => {
-                panic!("wrong state");
-            }
-        }
-        return uploader;
-    }
+        };
 
     match uploader.state {
         crate::state_machine::UploaderState::GetRemoteMetadata => {
@@ -216,7 +218,7 @@ async fn do_metadata(
                 .base_ctx
                 .azure_client
                 .container_client
-                .blob_client(maybe_filename_as_string.unwrap());
+                .blob_client(filename_as_string);
             match blob_client.get_properties().into_future().await {
                 Ok(resp) => {
                     uploader
@@ -269,7 +271,7 @@ async fn do_metadata(
                 ctx.base_ctx
                     .azure_client
                     .data_lake_client
-                    .get_directory_client(maybe_filename_as_string.unwrap());
+                    .get_directory_client(filename_as_string);
 
             // Making a directory is an entirely best-effort operation. Some
             // types of Azure storage account don't even support directories.
@@ -294,23 +296,6 @@ async fn do_metadata(
     uploader
 }
 
-#[cfg(unix)]
-fn hash_buf_size(metadata: &std::fs::Metadata) -> usize {
-    let mut buf_size: usize =
-        std::os::unix::fs::MetadataExt::blksize(metadata) as usize;
-    // keep doubling until it's at least 1 MB
-    while buf_size < 1048576 {
-        buf_size *= 2;
-    }
-    buf_size
-}
-
-#[cfg(not(unix))]
-fn hash_buf_size(metadata: &std::fs::Metadata) -> usize {
-    // just use 1 MB
-    1048576
-}
-
 fn do_hash(
     ctx: &std::sync::Arc<crate::ctx::Ctx>,
     buf: &mut Vec<u8>,
@@ -326,7 +311,7 @@ fn do_hash(
             }
         }
     };
-    buf.resize(hash_buf_size(&uploader.local_metadata), 0u8);
+    buf.resize(wuffblob::util::io_block_size(&uploader.local_metadata), 0u8);
     let mut hasher: md5::Md5 = <md5::Md5 as md5::Digest>::new();
     let mut num_bytes_left: u64 = uploader.local_metadata.len();
     while num_bytes_left > 0 {
@@ -376,21 +361,25 @@ async fn do_upload(
     ctx: std::sync::Arc<crate::ctx::Ctx>,
     mut uploader: Box<crate::state_machine::Uploader>,
 ) -> Box<crate::state_machine::Uploader> {
-    let maybe_filename_as_string: Result<String, std::ffi::OsString> =
-        uploader.remote_path.to_osstring().into_string();
-    if maybe_filename_as_string.is_err() {
-        uploader.upload_failed(
-            &ctx,
-            &wuffblob::error::WuffError::from("path is not valid unicode"),
-        );
-        return uploader;
-    }
+    let filename_as_string: String =
+        match uploader.remote_path.to_osstring().into_string() {
+            Ok(s) => s,
+            Err(_) => {
+                uploader.upload_failed(
+                    &ctx,
+                    &wuffblob::error::WuffError::from(
+                        "path is not valid unicode",
+                    ),
+                );
+                return uploader;
+            }
+        };
 
     let blob_client: azure_storage_blobs::prelude::BlobClient = ctx
         .base_ctx
         .azure_client
         .container_client
-        .blob_client(maybe_filename_as_string.unwrap());
+        .blob_client(filename_as_string);
 
     let mark_progress: std::sync::Arc<dyn Fn(u64) + Send + Sync> =
         std::sync::Arc::new({
@@ -488,21 +477,25 @@ async fn do_verify(
     ctx: std::sync::Arc<crate::ctx::Ctx>,
     mut uploader: Box<crate::state_machine::Uploader>,
 ) -> Box<crate::state_machine::Uploader> {
-    let maybe_filename_as_string: Result<String, std::ffi::OsString> =
-        uploader.remote_path.to_osstring().into_string();
-    if maybe_filename_as_string.is_err() {
-        uploader.verify_failed(
-            &ctx,
-            &wuffblob::error::WuffError::from("path is not valid unicode"),
-        );
-        return uploader;
-    }
+    let filename_as_string: String =
+        match uploader.remote_path.to_osstring().into_string() {
+            Ok(s) => s,
+            Err(_) => {
+                uploader.verify_failed(
+                    &ctx,
+                    &wuffblob::error::WuffError::from(
+                        "path is not valid unicode",
+                    ),
+                );
+                return uploader;
+            }
+        };
 
     let blob_client: azure_storage_blobs::prelude::BlobClient = ctx
         .base_ctx
         .azure_client
         .container_client
-        .blob_client(maybe_filename_as_string.unwrap());
+        .blob_client(filename_as_string);
 
     let mut chunks_stream = blob_client.get().into_stream();
     let mut hasher: md5::Md5 = <md5::Md5 as md5::Digest>::new();
@@ -591,7 +584,7 @@ async fn async_main(
     })?;
 
     let mut runner: wuffblob::runner::Runner<crate::state_machine::Uploader> =
-        wuffblob::runner::Runner::new(1000);
+        wuffblob::runner::Runner::new();
 
     runner.handle_terminal(
         &ctx.base_ctx,
@@ -601,6 +594,7 @@ async fn async_main(
         |_uploader: Box<crate::state_machine::Uploader>| -> Result<(), wuffblob::error::WuffError> {
             Ok(())
         },
+        1000,
     );
 
     runner.handle_terminal(
@@ -618,6 +612,7 @@ async fn async_main(
                 panic!("wrong state");
             }
         },
+        1000,
     );
 
     runner.handle_nonterminal_async(
@@ -636,6 +631,7 @@ async fn async_main(
                 do_metadata(std::sync::Arc::clone(&ctx), uploader)
             }
         },
+        1000,
         ctx.base_ctx.metadata_concurrency,
     );
 
@@ -652,6 +648,7 @@ async fn async_main(
                 do_hash(&ctx, &mut buf, uploader)
             }
         },
+        1000,
     );
 
     runner.handle_nonterminal_async(
@@ -669,6 +666,7 @@ async fn async_main(
                 do_upload(std::sync::Arc::clone(&ctx), uploader)
             }
         },
+        1000,
         ctx.base_ctx.data_concurrency,
     );
 
@@ -687,20 +685,25 @@ async fn async_main(
                 do_verify(std::sync::Arc::clone(&ctx), uploader)
             }
         },
+        1000,
         ctx.base_ctx.data_concurrency,
     );
 
     runner
-        .run_blocking(&ctx.base_ctx, {
-            let ctx: std::sync::Arc<crate::ctx::Ctx> =
-                std::sync::Arc::clone(&ctx);
-            move |writer: tokio::sync::mpsc::Sender<
+        .run_blocking(
+            &ctx.base_ctx,
+            {
+                let ctx: std::sync::Arc<crate::ctx::Ctx> =
+                    std::sync::Arc::clone(&ctx);
+                move |writer: tokio::sync::mpsc::Sender<
                 Box<crate::state_machine::Uploader>,
             >|
                   -> Result<(), wuffblob::error::WuffError> {
                 feed(&ctx, writer)
             }
-        })
+            },
+            1000,
+        )
         .await
 }
 

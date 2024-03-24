@@ -157,16 +157,14 @@ impl<T> RunnerInsideMutex<T> {
 }
 
 pub struct Runner<T> {
-    queue_size: usize,
     inside_mutex: std::sync::Arc<std::sync::RwLock<RunnerInsideMutex<T>>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl<T: Send + 'static> Runner<T> {
-    pub fn new(queue_size: usize) -> Runner<T> {
+    pub fn new() -> Runner<T> {
         let (bad_writer, _) = tokio::sync::mpsc::channel::<Box<T>>(1);
         Runner {
-            queue_size: queue_size,
             inside_mutex: std::sync::Arc::new(std::sync::RwLock::new(
                 RunnerInsideMutex {
                     status: None,
@@ -189,6 +187,7 @@ impl<T: Send + 'static> Runner<T> {
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         pred: P,
         mut handler: H,
+        queue_size: usize,
     ) where
         P: Fn(&T) -> bool + Send + Sync + 'static,
         H: FnMut(Box<T>) -> Result<(), crate::error::WuffError>
@@ -198,7 +197,7 @@ impl<T: Send + 'static> Runner<T> {
         let pred: std::sync::Arc<dyn Fn(&T) -> bool + Send + Sync> =
             std::sync::Arc::new(pred);
         let (writer, mut reader) =
-            tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
+            tokio::sync::mpsc::channel::<Box<T>>(queue_size);
 
         self.nanny(
             ctx,
@@ -234,6 +233,7 @@ impl<T: Send + 'static> Runner<T> {
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         pred: P,
         mut handler: H,
+        queue_size: usize,
     ) where
         P: Fn(&T) -> bool + Send + Sync + 'static,
         H: FnMut(&mut T) + Send + 'static,
@@ -241,7 +241,7 @@ impl<T: Send + 'static> Runner<T> {
         let pred: std::sync::Arc<dyn Fn(&T) -> bool + Send + Sync> =
             std::sync::Arc::new(pred);
         let (writer, mut reader) =
-            tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
+            tokio::sync::mpsc::channel::<Box<T>>(queue_size);
 
         self.nanny(
             ctx,
@@ -319,6 +319,7 @@ impl<T: Send + 'static> Runner<T> {
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         pred: P,
         handler: H,
+        queue_size: usize,
         concurrency: u16,
     ) where
         P: Fn(&T) -> bool + Send + Sync + 'static,
@@ -377,7 +378,7 @@ impl<T: Send + 'static> Runner<T> {
         };
 
         let (writer, mut reader) =
-            tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
+            tokio::sync::mpsc::channel::<Box<T>>(queue_size);
         let bp: std::sync::Arc<crate::util::BoundedParallelism<Box<T>>> =
             std::sync::Arc::new(crate::util::BoundedParallelism::new(
                 concurrency,
@@ -488,6 +489,7 @@ impl<T: Send + 'static> Runner<T> {
         mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         feeder: F,
+        queue_size: usize,
     ) -> Result<(), crate::error::WuffError>
     where
         F: FnOnce(
@@ -497,7 +499,7 @@ impl<T: Send + 'static> Runner<T> {
             + 'static,
     {
         let (writer, reader) =
-            tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
+            tokio::sync::mpsc::channel::<Box<T>>(queue_size);
 
         self.nanny(
             ctx,
@@ -526,6 +528,7 @@ impl<T: Send + 'static> Runner<T> {
         mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         feeder: F,
+        queue_size: usize,
     ) -> Result<(), crate::error::WuffError>
     where
         F: FnOnce(tokio::sync::mpsc::Sender<Box<T>>) -> FF + Send + 'static,
@@ -533,7 +536,7 @@ impl<T: Send + 'static> Runner<T> {
             + Send,
     {
         let (writer, reader) =
-            tokio::sync::mpsc::channel::<Box<T>>(self.queue_size);
+            tokio::sync::mpsc::channel::<Box<T>>(queue_size);
 
         self.nanny(
             ctx,
@@ -674,55 +677,65 @@ impl TestStateMachineManager {
         &self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         runner: &mut Runner<TestStateMachine>,
+        queue_size: usize,
         async_concurrency: u16,
     ) {
         runner.handle_terminal(
             &ctx,
             TestStateMachine::pred_terminal,
             TestStateMachine::handle_terminal,
+            queue_size,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_1,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_2,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_3,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_4,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_5,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_6,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_7,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_8,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
     }
@@ -731,55 +744,65 @@ impl TestStateMachineManager {
         &self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         runner: &mut Runner<TestStateMachine>,
+        queue_size: usize,
         async_concurrency: u16,
     ) {
         runner.handle_terminal(
             &ctx,
             TestStateMachine::pred_terminal,
-            TestStateMachine::handle_terminal_ERR,
+            TestStateMachine::handle_terminal_err,
+            queue_size,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_1,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_2,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_3,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_4,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_5,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_6,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_7,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_8,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
     }
@@ -788,55 +811,65 @@ impl TestStateMachineManager {
         &self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         runner: &mut Runner<TestStateMachine>,
+        queue_size: usize,
         async_concurrency: u16,
     ) {
         runner.handle_terminal(
             &ctx,
             TestStateMachine::pred_terminal,
             TestStateMachine::handle_terminal,
+            queue_size,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_1,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_2,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_3,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_4,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_5,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_6,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_7,
-            TestStateMachine::handle_nonterminal_blocking_PANIC,
+            TestStateMachine::handle_nonterminal_blocking_panic,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_8,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
     }
@@ -845,55 +878,65 @@ impl TestStateMachineManager {
         &self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         runner: &mut Runner<TestStateMachine>,
+        queue_size: usize,
         async_concurrency: u16,
     ) {
         runner.handle_terminal(
             &ctx,
             TestStateMachine::pred_terminal,
             TestStateMachine::handle_terminal,
+            queue_size,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_1,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_2,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_3,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_4,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_5,
             TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_6,
             TestStateMachine::handle_nonterminal_async,
+            queue_size,
             async_concurrency,
         );
         runner.handle_nonterminal_blocking(
             &ctx,
             TestStateMachine::pred_nonterminal_blocking_7,
-            TestStateMachine::handle_nonterminal_blocking_PANIC,
+            TestStateMachine::handle_nonterminal_blocking,
+            queue_size,
         );
         runner.handle_nonterminal_async(
             &ctx,
             TestStateMachine::pred_nonterminal_async_8,
-            TestStateMachine::handle_nonterminal_async,
+            TestStateMachine::handle_nonterminal_async_panic,
+            queue_size,
             async_concurrency,
         );
     }
@@ -955,7 +998,7 @@ impl TestStateMachineManager {
         Ok(())
     }
 
-    fn deterministic_feeder_blocking_ERR(
+    fn deterministic_feeder_blocking_err(
         self: std::sync::Arc<Self>,
         writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>,
     ) -> Result<(), crate::error::WuffError> {
@@ -971,7 +1014,7 @@ impl TestStateMachineManager {
         Err("Snyarf, snyarf, snyarf!".into())
     }
 
-    async fn deterministic_feeder_async_ERR(
+    async fn deterministic_feeder_async_err(
         self: std::sync::Arc<Self>,
         writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>,
     ) -> Result<(), crate::error::WuffError> {
@@ -1005,7 +1048,7 @@ impl TestStateMachine {
         done[self.id] = true;
         Ok(())
     }
-    fn handle_terminal_ERR(
+    fn handle_terminal_err(
         self: Box<Self>,
     ) -> Result<(), crate::error::WuffError> {
         if self.id == 5000 {
@@ -1023,7 +1066,7 @@ impl TestStateMachine {
     fn handle_nonterminal_blocking(&mut self) {
         self.advance_state();
     }
-    fn handle_nonterminal_blocking_PANIC(&mut self) {
+    fn handle_nonterminal_blocking_panic(&mut self) {
         if self.id == 5000 {
             panic!("at the disco");
         } else {
@@ -1037,7 +1080,7 @@ impl TestStateMachine {
         self.advance_state();
         self
     }
-    async fn handle_nonterminal_async_PANIC(mut self: Box<Self>) -> Box<Self> {
+    async fn handle_nonterminal_async_panic(mut self: Box<Self>) -> Box<Self> {
         if self.id == 5000 {
             panic!("at the disco");
         } else {
@@ -1102,15 +1145,19 @@ fn test_runner_success_with_blocking_feeder() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(10000);
-        let mut runner: Runner<TestStateMachine> = Runner::new(100);
-        mgr.install_for_success(&ctx, &mut runner, 10);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_for_success(&ctx, &mut runner, 100, 10);
         runner
-            .run_blocking(&ctx, {
-                let mgr = std::sync::Arc::clone(&mgr);
-                move |writer: tokio::sync::mpsc::Sender<
-                    Box<TestStateMachine>,
-                >| { mgr.rand_feeder_blocking(writer) }
-            })
+            .run_blocking(
+                &ctx,
+                {
+                    let mgr = std::sync::Arc::clone(&mgr);
+                    move |writer: tokio::sync::mpsc::Sender<
+                        Box<TestStateMachine>,
+                    >| { mgr.rand_feeder_blocking(writer) }
+                },
+                100,
+            )
             .await
             .expect("should have succeeded");
         let done = mgr.done.lock().unwrap();
@@ -1137,15 +1184,19 @@ fn test_runner_success_with_async_feeder() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(10000);
-        let mut runner: Runner<TestStateMachine> = Runner::new(100);
-        mgr.install_for_success(&ctx, &mut runner, 10);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_for_success(&ctx, &mut runner, 100, 10);
         runner
-            .run_async(&ctx, {
-                let mgr = std::sync::Arc::clone(&mgr);
-                move |writer: tokio::sync::mpsc::Sender<
-                    Box<TestStateMachine>,
-                >| { mgr.rand_feeder_async(writer) }
-            })
+            .run_async(
+                &ctx,
+                {
+                    let mgr = std::sync::Arc::clone(&mgr);
+                    move |writer: tokio::sync::mpsc::Sender<
+                        Box<TestStateMachine>,
+                    >| { mgr.rand_feeder_async(writer) }
+                },
+                100,
+            )
             .await
             .expect("should have succeeded");
         let done = mgr.done.lock().unwrap();
@@ -1172,18 +1223,22 @@ fn test_runner_with_panic_in_blocking_handler() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(10000);
-        let mut runner: Runner<TestStateMachine> = Runner::new(100);
-        mgr.install_with_one_blocking_that_panics(&ctx, &mut runner, 10);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_with_one_blocking_that_panics(&ctx, &mut runner, 100, 10);
         let result = runner
-            .run_blocking(&ctx, {
-                let mgr = std::sync::Arc::clone(&mgr);
-                move |writer: tokio::sync::mpsc::Sender<
+            .run_blocking(
+                &ctx,
+                {
+                    let mgr = std::sync::Arc::clone(&mgr);
+                    move |writer: tokio::sync::mpsc::Sender<
                     Box<TestStateMachine>,
                 >|
                       -> Result<(), crate::error::WuffError> {
                     mgr.deterministic_feeder_blocking(writer)
                 }
-            })
+                },
+                100,
+            )
             .await;
         assert!(result.is_err());
         let done = mgr.done.lock().unwrap();
@@ -1205,18 +1260,22 @@ fn test_runner_with_panic_in_async_handler() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(10000);
-        let mut runner: Runner<TestStateMachine> = Runner::new(100);
-        mgr.install_with_one_async_that_panics(&ctx, &mut runner, 10);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_with_one_async_that_panics(&ctx, &mut runner, 100, 10);
         let result = runner
-            .run_blocking(&ctx, {
-                let mgr = std::sync::Arc::clone(&mgr);
-                move |writer: tokio::sync::mpsc::Sender<
+            .run_blocking(
+                &ctx,
+                {
+                    let mgr = std::sync::Arc::clone(&mgr);
+                    move |writer: tokio::sync::mpsc::Sender<
                     Box<TestStateMachine>,
                 >|
                       -> Result<(), crate::error::WuffError> {
                     mgr.deterministic_feeder_blocking(writer)
                 }
-            })
+                },
+                100,
+            )
             .await;
         assert!(result.is_err());
         let done = mgr.done.lock().unwrap();
@@ -1238,18 +1297,22 @@ fn test_runner_with_err_in_terminal_handler() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(10000);
-        let mut runner: Runner<TestStateMachine> = Runner::new(100);
-        mgr.install_with_terminal_that_errors(&ctx, &mut runner, 10);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_with_terminal_that_errors(&ctx, &mut runner, 100, 10);
         let result = runner
-            .run_blocking(&ctx, {
-                let mgr = std::sync::Arc::clone(&mgr);
-                move |writer: tokio::sync::mpsc::Sender<
+            .run_blocking(
+                &ctx,
+                {
+                    let mgr = std::sync::Arc::clone(&mgr);
+                    move |writer: tokio::sync::mpsc::Sender<
                     Box<TestStateMachine>,
                 >|
                       -> Result<(), crate::error::WuffError> {
                     mgr.deterministic_feeder_blocking(writer)
                 }
-            })
+                },
+                100,
+            )
             .await;
         assert!(result.is_err());
         let done = mgr.done.lock().unwrap();
@@ -1271,18 +1334,22 @@ fn test_runner_with_err_in_blocking_feeder() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(10000);
-        let mut runner: Runner<TestStateMachine> = Runner::new(100);
-        mgr.install_for_success(&ctx, &mut runner, 10);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_for_success(&ctx, &mut runner, 100, 10);
         let result = runner
-            .run_blocking(&ctx, {
-                let mgr = std::sync::Arc::clone(&mgr);
-                move |writer: tokio::sync::mpsc::Sender<
+            .run_blocking(
+                &ctx,
+                {
+                    let mgr = std::sync::Arc::clone(&mgr);
+                    move |writer: tokio::sync::mpsc::Sender<
                     Box<TestStateMachine>,
                 >|
                       -> Result<(), crate::error::WuffError> {
-                    mgr.deterministic_feeder_blocking_ERR(writer)
+                    mgr.deterministic_feeder_blocking_err(writer)
                 }
-            })
+                },
+                100,
+            )
             .await;
         assert!(result.is_err());
         let done = mgr.done.lock().unwrap();
@@ -1304,17 +1371,21 @@ fn test_runner_with_err_in_async_feeder() {
     let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal());
     ctx.run_async_main(async {
         let mgr = TestStateMachineManager::new(10000);
-        let mut runner: Runner<TestStateMachine> = Runner::new(100);
-        mgr.install_for_success(&ctx, &mut runner, 10);
+        let mut runner: Runner<TestStateMachine> = Runner::new();
+        mgr.install_for_success(&ctx, &mut runner, 100, 10);
         let result = runner
-            .run_async(&ctx, {
-                let mgr = std::sync::Arc::clone(&mgr);
-                move |writer: tokio::sync::mpsc::Sender<
-                    Box<TestStateMachine>,
-                >| {
-                    mgr.deterministic_feeder_async_ERR(writer)
-                }
-            })
+            .run_async(
+                &ctx,
+                {
+                    let mgr = std::sync::Arc::clone(&mgr);
+                    move |writer: tokio::sync::mpsc::Sender<
+                        Box<TestStateMachine>,
+                    >| {
+                        mgr.deterministic_feeder_async_err(writer)
+                    }
+                },
+                100,
+            )
             .await;
         assert!(result.is_err());
         let done = mgr.done.lock().unwrap();

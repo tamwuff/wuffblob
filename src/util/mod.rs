@@ -257,6 +257,46 @@ pub fn fake_blob_properties_directory(
     blob_properties
 }
 
+#[cfg(unix)]
+pub fn io_block_size(metadata: &std::fs::Metadata) -> usize {
+    let mut n: usize =
+        std::os::unix::fs::MetadataExt::blksize(metadata) as usize;
+    // keep doubling until it's at least 1 MB
+    while n < 1048576 {
+        n *= 2;
+    }
+    n
+}
+
+#[cfg(not(unix))]
+pub fn io_block_size(metadata: &std::fs::Metadata) -> usize {
+    // just use 1 MB
+    1048576
+}
+
+// this makes no sense
+pub fn blob_is_dir(thing: &azure_storage_blobs::blob::Blob) -> bool {
+    // Sometimes directories show up with resource_type=directory, and no
+    // hdi_isfolder
+    if let Some(ref resource_type) = thing.properties.resource_type {
+        if resource_type == "directory" {
+            return true;
+        }
+    }
+
+    // Sometimes directories show up as hdi_isfolder, with no resource_type
+    if let Some(ref stuff) = thing.metadata {
+        if let Some(val) = stuff.get("hdi_isfolder") {
+            if val == "true" {
+                return true;
+            }
+        }
+    }
+
+    // If it has neither, it's *probably* not a directory. I think. I hope.
+    false
+}
+
 #[test]
 fn hex_empty() {
     let v = Vec::<u8>::new();

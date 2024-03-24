@@ -25,7 +25,7 @@ pub enum DownloaderState {
     // Please hash the file starting from offset N bytes.
     SuffixHash(u64, md5::Md5),
 
-    // Please truncate me to the proper length, fsync me, and close me.
+    // Please truncate me to the proper length and fsync me.
     Finalize,
 }
 
@@ -43,10 +43,11 @@ pub struct Downloader {
 
 impl Downloader {
     pub fn new(
-        ctx: &std::sync::Arc<crate::ctx::Ctx>,
+        _ctx: &std::sync::Arc<crate::ctx::Ctx>,
         remote_path: wuffblob::path::WuffPath,
         local_path: std::path::PathBuf,
         remote_metadata: azure_storage_blobs::blob::BlobProperties,
+        is_dir: bool,
     ) -> Downloader {
         // I don't find the behavior of std::path::Path::parent() useful here.
         // Basically I'm trying to figure out if the path is something like:
@@ -95,12 +96,6 @@ impl Downloader {
             }
         }
 
-        let mut is_dir: bool = false;
-        if let Some(ref resource_type) = remote_metadata.resource_type {
-            if resource_type == "directory" {
-                is_dir = true;
-            }
-        }
         let state: DownloaderState = if is_dir {
             if self_reasonable_to_mkdir {
                 DownloaderState::Mkdir(local_path.clone())
@@ -311,19 +306,23 @@ impl Downloader {
         }
     }
 
-    pub fn suffix_download_failed(
+    pub fn download_failed(
         &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
         err: &wuffblob::error::WuffError,
     ) {
-        if !matches!(self.state, DownloaderState::SuffixDownload(_, _)) {
+        if !matches!(
+            self.state,
+            DownloaderState::SuffixDownload(_, _)
+                | DownloaderState::PrefixDownload(_)
+        ) {
             panic!(
-                "State is {:?}, expected DownloaderState::SuffixDownload",
+                "State is {:?}, expected DownloaderState::SuffixDownload or DownloaderState::PrefixDownload",
                 &self.state
             );
         }
 
-        self.set_state_to_local_error(ctx, err);
+        self.set_state_to_remote_error(ctx, err);
     }
 
     pub fn suffix_download_succeeded(
@@ -355,21 +354,6 @@ impl Downloader {
         } else {
             self.state = DownloaderState::PrefixDownload(marker_pos);
         }
-    }
-
-    pub fn prefix_download_failed(
-        &mut self,
-        ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
-    ) {
-        if !matches!(self.state, DownloaderState::PrefixDownload(_)) {
-            panic!(
-                "State is {:?}, expected DownloaderState::PrefixDownload",
-                &self.state
-            );
-        }
-
-        self.set_state_to_local_error(ctx, err);
     }
 
     pub fn prefix_download_succeeded(
@@ -531,6 +515,7 @@ fn slash_goes_straight_to_ok() {
         "foo/bar".into(),
         "/".into(),
         wuffblob::util::fake_blob_properties_directory(),
+        true,
     );
 
     assert!(
@@ -548,6 +533,7 @@ fn dir_goes_to_mkdir() {
         "foo/bar".into(),
         "foo/bar".into(),
         wuffblob::util::fake_blob_properties_directory(),
+        true,
     );
 
     assert!(
@@ -572,6 +558,7 @@ fn file_cannot_be_named_dotdot() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
 
     assert!(
@@ -593,6 +580,7 @@ fn file_goes_to_mkdir_for_parent() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
 
     assert!(
@@ -617,6 +605,7 @@ fn file_with_no_parent_goes_straight_to_open() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
 
     assert!(
@@ -634,6 +623,7 @@ fn failed_mkdir_goes_to_error() {
         "foo/bar".into(),
         "foo/bar".into(),
         wuffblob::util::fake_blob_properties_directory(),
+        true,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Mkdir(_)),
@@ -658,6 +648,7 @@ fn mkdir_for_directory_goes_to_ok() {
         "foo/bar".into(),
         "foo/bar".into(),
         wuffblob::util::fake_blob_properties_directory(),
+        true,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Mkdir(_)),
@@ -685,6 +676,7 @@ fn mkdir_for_file_goes_to_open() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Mkdir(_)),
@@ -712,6 +704,7 @@ fn failed_open_goes_to_error() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -740,6 +733,7 @@ fn open_with_zero_size_goes_to_suffix_download() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -767,6 +761,7 @@ fn open_with_nonzero_size_goes_to_prefix_hash() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -797,6 +792,7 @@ fn failed_prefix_hash_goes_to_err() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -836,6 +832,7 @@ fn prefix_hash_with_incomplete_file_goes_to_suffix_download() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -877,6 +874,7 @@ fn prefix_hash_with_complete_file_and_correct_hash_goes_to_finalize() {
             13,
             Some(&correct_hash),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -916,6 +914,7 @@ fn prefix_hash_with_complete_file_and_incorrect_hash_goes_to_suffix_download()
             13,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -952,6 +951,7 @@ fn failed_suffix_download_goes_to_err() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -965,10 +965,8 @@ fn failed_suffix_download_goes_to_err() {
         &downloader.state
     );
 
-    downloader.suffix_download_failed(
-        &ctx,
-        &wuffblob::error::WuffError::from("squeeeee"),
-    );
+    downloader
+        .download_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(downloader.state, DownloaderState::Error(_)),
         "State: {:?}",
@@ -988,6 +986,7 @@ fn suffix_download_with_correct_hash_goes_to_finalize() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -1021,6 +1020,7 @@ fn full_suffix_download_with_incorrect_hash_goes_to_err() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -1054,6 +1054,7 @@ fn partial_suffix_download_with_incorrect_hash_goes_to_prefix_download() {
             13,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -1094,6 +1095,7 @@ fn failed_prefix_download_goes_to_err() {
             13,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -1120,10 +1122,8 @@ fn failed_prefix_download_goes_to_err() {
         &downloader.state
     );
 
-    downloader.prefix_download_failed(
-        &ctx,
-        &wuffblob::error::WuffError::from("squeeeee"),
-    );
+    downloader
+        .download_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(downloader.state, DownloaderState::Error(_)),
         "State: {:?}",
@@ -1143,6 +1143,7 @@ fn successful_prefix_download_goes_to_suffix_hash() {
             13,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -1190,6 +1191,7 @@ fn failed_suffix_hash_goes_to_err() {
             13,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -1246,6 +1248,7 @@ fn successful_suffix_hash_with_incorrect_hash_goes_to_err() {
             13,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -1299,6 +1302,7 @@ fn successful_suffix_hash_with_correct_hash_goes_to_finalize() {
             13,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -1352,6 +1356,7 @@ fn failed_finalize_goes_to_err() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),
@@ -1392,6 +1397,7 @@ fn successful_finalize_goes_to_ok() {
             42,
             Some(&[23u8; 16]),
         ),
+        false,
     );
     assert!(
         matches!(downloader.state, DownloaderState::Open),

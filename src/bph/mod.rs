@@ -60,7 +60,7 @@ fn empty() {
         0xd4u8, 0x1du8, 0x8cu8, 0xd9u8, 0x8fu8, 0x00u8, 0xb2u8, 0x04u8,
         0xe9u8, 0x80u8, 0x09u8, 0x98u8, 0xecu8, 0xf8u8, 0x42u8, 0x7eu8,
     ];
-    let mut hasher = BulletproofHasher::new();
+    let hasher = BulletproofHasher::new();
     let hash = hasher.digest(0);
     assert!(hash.is_ok());
     assert_eq!(hash.unwrap(), correct_hash);

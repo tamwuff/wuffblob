@@ -1,0 +1,6 @@
+* fsck already respects -n, but neither upload nor download do. Fix that.
+* replace fsck ad-hoc state machine runner with actual runner
+* remove BoundedParallelism from ctx
+* change everything over to wuffblob::util::blob_is_dir()
+* can fsck do anything to detect "foo" as a file, plus "foo/bar" as a file?
+* switch to consuming errors everywhere, not taking a reference

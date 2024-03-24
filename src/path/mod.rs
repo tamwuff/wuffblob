@@ -211,6 +211,32 @@ impl WuffPath {
         }
         Ok(())
     }
+
+    pub fn merge_into_os_path(
+        &self,
+        base: &WuffPath,
+        base_os_path: &std::path::Path,
+    ) -> Result<std::path::PathBuf, crate::error::WuffError> {
+        assert!(self.is_canonical());
+        assert!(base.is_componentless() || base.is_canonical());
+        if self.components.len() < base.components.len() {
+            return Err(
+                format!("{} does not begin with {}", self, base).into()
+            );
+        }
+        for i in 0..base.components.len() {
+            if self.components[i] != base.components[i] {
+                return Err(
+                    format!("{} does not begin with {}", self, base).into()
+                );
+            }
+        }
+        let mut os_path: std::path::PathBuf = base_os_path.into();
+        for i in base.components.len()..self.components.len() {
+            os_path.push(&self.components[i]);
+        }
+        Ok(os_path)
+    }
 }
 
 impl From<&std::ffi::OsStr> for WuffPath {
@@ -649,6 +675,44 @@ fn from_path_gnarly_lots_of_things() {
         p.to_osstring(),
         Into::<std::ffi::OsString>::into(String::from("/foo/../bar"))
     );
+}
+
+#[test]
+fn merge_where_path_shorter_than_base() {
+    let wp: WuffPath = "foo/bar".into();
+    let wb: WuffPath = "foo/bar/baz".into();
+    let p: &std::path::Path = std::path::Path::new("quack/meow");
+    let result = wp.merge_into_os_path(&wb, p);
+    assert!(result.is_err());
+}
+
+#[test]
+fn merge_where_path_not_child_of_base() {
+    let wp: WuffPath = "foo/bar/baz".into();
+    let wb: WuffPath = "foo/baz".into();
+    let p: &std::path::Path = std::path::Path::new("quack/meow");
+    let result = wp.merge_into_os_path(&wb, p);
+    assert!(result.is_err());
+}
+
+#[test]
+fn merge_where_path_same_as_base() {
+    let wp: WuffPath = "foo/bar".into();
+    let wb: WuffPath = "foo/bar".into();
+    let p: &std::path::Path = std::path::Path::new("quack/meow");
+    let result = wp.merge_into_os_path(&wb, p);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), std::path::Path::new("quack/meow"));
+}
+
+#[test]
+fn merge_where_path_child_of_base() {
+    let wp: WuffPath = "foo/bar/baz".into();
+    let wb: WuffPath = "foo".into();
+    let p: &std::path::Path = std::path::Path::new("quack/meow");
+    let result = wp.merge_into_os_path(&wb, p);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), std::path::Path::new("quack/meow/bar/baz"));
 }
 
 #[test]
