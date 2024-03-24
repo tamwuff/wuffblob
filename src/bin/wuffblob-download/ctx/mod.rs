@@ -2,20 +2,13 @@
 pub struct Stats {
     pub files_found: u64,
     pub bytes_found: u64,
-    pub files_queried_in_cloud: u64,
     pub done_listing: bool,
-    pub files_need_hashing_locally: u64,
     pub bytes_need_hashing_locally: u64,
-    pub files_completed_hashing_locally: u64,
     pub bytes_completed_hashing_locally: u64,
-    pub files_can_reuse: u64,
     pub bytes_can_reuse: u64,
-    pub files_need_download: u64,
     pub bytes_need_download: u64,
-    pub files_downloaded: u64,
     pub bytes_downloaded: u64,
-    pub files_verified: u64,
-    pub bytes_verified: u64,
+    pub files_done: u64,
 }
 
 impl Stats {
@@ -23,20 +16,13 @@ impl Stats {
         Stats {
             files_found: 0u64,
             bytes_found: 0u64,
-            files_queried_in_cloud: 0u64,
             done_listing: false,
-            files_need_hashing_locally: 0u64,
             bytes_need_hashing_locally: 0u64,
-            files_completed_hashing_locally: 0u64,
             bytes_completed_hashing_locally: 0u64,
-            files_can_reuse: 0u64,
             bytes_can_reuse: 0u64,
-            files_need_download: 0u64,
             bytes_need_download: 0u64,
-            files_downloaded: 0u64,
             bytes_downloaded: 0u64,
-            files_verified: 0u64,
-            bytes_verified: 0u64,
+            files_done: 0u64,
         }
     }
 }
@@ -119,6 +105,47 @@ pub fn siginfo_handler(ctx: &std::sync::Arc<Ctx>) {
 
     let mut s: String = String::new();
     s.push_str("\n\n");
+    if stats.done_listing {
+        s.push_str(&format!(
+            "Downloaded {} of {} (final count)\n",
+            stats.files_done, stats.files_found
+        ));
+    } else {
+        s.push_str(&format!(
+            "Downloaded {} of {} found so far (list not yet complete)\n",
+            stats.files_done, stats.files_found
+        ));
+    }
+    if stats.bytes_found > 0u64 {
+        s.push_str(&format!(
+            "Can reuse: {} of {} bytes\n",
+            stats.bytes_can_reuse, stats.bytes_found
+        ));
+        s.push_str(&format!(
+            "Need to download: {} of {} bytes\n",
+            stats.bytes_need_download, stats.bytes_found
+        ));
+    }
+    s.push_str("\n");
+
+    if (stats.bytes_need_download > 0u64)
+        || (stats.bytes_need_hashing_locally > 0u64)
+    {
+        if stats.bytes_need_download > 0u64 {
+            s.push_str(&format!(
+                "Downloaded: {} of {} bytes\n",
+                stats.bytes_downloaded, stats.bytes_need_download,
+            ));
+        }
+        if stats.bytes_need_hashing_locally > 0u64 {
+            s.push_str(&format!(
+                "Hashing: {} of {} bytes\n",
+                stats.bytes_completed_hashing_locally,
+                stats.bytes_need_hashing_locally
+            ));
+        }
+        s.push_str("\n");
+    }
 
     print!("{}", s);
 }

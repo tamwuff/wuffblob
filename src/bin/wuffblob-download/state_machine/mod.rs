@@ -191,6 +191,8 @@ impl Downloader {
                         format!("is {:?}, not file", metadata.file_type()),
                     );
                     return;
+                } else if self.remote_metadata.content_length == 0 {
+                    self.state = DownloaderState::Finalize;
                 } else if metadata.len() == 0 {
                     self.state = DownloaderState::SuffixDownload(
                         0,
@@ -716,6 +718,37 @@ fn failed_open_goes_to_error() {
         .open_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(downloader.state, DownloaderState::Error(_)),
+        "State: {:?}",
+        &downloader.state
+    );
+}
+
+#[test]
+fn open_goes_to_finalize_if_blob_is_zero_bytes() {
+    let ctx = std::sync::Arc::new(crate::ctx::Ctx::new_minimal("foo", "foo"));
+    let mut downloader = Downloader::new(
+        &ctx,
+        "foo/bar".into(),
+        "foo".into(),
+        wuffblob::util::fake_blob_properties_file(
+            "text/plain",
+            0,
+            Some(&[23u8; 16]),
+        ),
+        false,
+    );
+    assert!(
+        matches!(downloader.state, DownloaderState::Open),
+        "State: {:?}",
+        &downloader.state
+    );
+
+    downloader.open_succeeded(
+        &ctx,
+        wuffblob::util::temp_local_file("Hello, world!"),
+    );
+    assert!(
+        matches!(downloader.state, DownloaderState::Finalize),
         "State: {:?}",
         &downloader.state
     );

@@ -65,6 +65,17 @@ async fn feed(
             match blob_client.get_properties().into_future().await {
                 Ok(resp) => {
                     let is_dir: bool = wuffblob::util::blob_is_dir(&resp.blob);
+                    if is_dir {
+                        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                            stats.files_found += 1;
+                        });
+                    } else {
+                        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                            stats.files_found += 1;
+                            stats.bytes_found +=
+                                resp.blob.properties.content_length;
+                        });
+                    }
                     writer
                         .send(Box::new(crate::state_machine::Downloader::new(
                             &ctx,
@@ -123,6 +134,16 @@ async fn feed(
                     // Here's the big payoff for us having consumed everything:
                     // we get to move blob.properties. Yay!
                     let is_dir: bool = wuffblob::util::blob_is_dir(&blob);
+                    if is_dir {
+                        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                            stats.files_found += 1;
+                        });
+                    } else {
+                        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                            stats.files_found += 1;
+                            stats.bytes_found += blob.properties.content_length;
+                        });
+                    }
                     writer
                         .send(Box::new(crate::state_machine::Downloader::new(
                             &ctx,
@@ -137,6 +158,9 @@ async fn feed(
             }
         }
     }
+    ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+        stats.done_listing = true;
+    });
     Ok(())
 }
 
@@ -299,6 +323,25 @@ fn do_open(
     {
         Ok(f) => {
             downloader.open_succeeded(ctx, f);
+            if let crate::state_machine::DownloaderState::SuffixDownload(
+                marker_pos,
+                _,
+            )
+            | crate::state_machine::DownloaderState::PrefixHash(
+                marker_pos,
+            ) = downloader.state
+            {
+                // The assumption, which we'll go with until we find out
+                // differently, is that from zero to 'marker_pos' is okay
+                // (but will need to be hashed), and from 'marker_pos' to
+                // the end of the file will need to be downloaded.
+                ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                    stats.bytes_need_hashing_locally += marker_pos;
+                    stats.bytes_can_reuse += marker_pos;
+                    stats.bytes_need_download +=
+                        downloader.remote_metadata.content_length - marker_pos;
+                });
+            }
         }
         Err(e) => {
             downloader.open_failed(ctx, &wuffblob::error::WuffError::from(e));
@@ -351,9 +394,26 @@ fn do_prefix_hash(
             return;
         }
         <md5::Md5 as md5::Digest>::update(&mut hasher, &buf);
+        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+            stats.bytes_completed_hashing_locally += buf.len() as u64;
+        });
         num_bytes_left -= buf.len() as u64;
     }
     downloader.prefix_hash_succeeded(ctx, hasher);
+    if let crate::state_machine::DownloaderState::SuffixDownload(
+        new_marker_pos,
+        _,
+    ) = downloader.state
+    {
+        // Has the plan changed? The new marker pos might be different
+        // from the old one.
+        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+            stats.bytes_can_reuse -= marker_pos;
+            stats.bytes_can_reuse += new_marker_pos;
+            stats.bytes_need_download += marker_pos;
+            stats.bytes_need_download -= new_marker_pos;
+        });
+    }
 }
 
 fn do_suffix_hash(
@@ -412,6 +472,9 @@ fn do_suffix_hash(
                 return;
             }
             <md5::Md5 as md5::Digest>::update(&mut hasher, &buf);
+            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                stats.bytes_completed_hashing_locally += buf.len() as u64;
+            });
             num_bytes_left -= buf.len() as u64;
         }
     }
@@ -430,6 +493,9 @@ fn do_suffix_hash(
             return;
         }
         <md5::Md5 as md5::Digest>::update(&mut hasher, &buf);
+        ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+            stats.bytes_completed_hashing_locally += buf.len() as u64;
+        });
         num_bytes_left -= buf.len() as u64;
     }
     downloader.suffix_hash_succeeded(
@@ -470,6 +536,20 @@ async fn do_download(
             debug_assert!(off == off_start);
         }
         Err(e) => {
+            downloader
+                .download_failed(&ctx, &wuffblob::error::WuffError::from(e));
+            return downloader;
+        }
+    }
+
+    // If this is a suffix download, truncate the file to where we currently
+    // are. This is not necessary for correctness, but it will help if we're
+    // interrupted before we finish, because when the user retries, it'll be
+    // obvious where they should resume from.
+    if off_end == downloader.remote_metadata.content_length {
+        if let Err(e) =
+            downloader.local_file.as_mut().unwrap().set_len(off_start)
+        {
             downloader
                 .download_failed(&ctx, &wuffblob::error::WuffError::from(e));
             return downloader;
@@ -534,6 +614,12 @@ async fn do_download(
                                     &mut hasher,
                                     buf,
                                 );
+                                ctx.mutate_stats(
+                                    |stats: &mut crate::ctx::Stats| {
+                                        stats.bytes_downloaded +=
+                                            buf_len as u64;
+                                    },
+                                );
                             }
                         }
                         Err(err) => {
@@ -577,6 +663,18 @@ async fn do_download(
                     .try_into()
                     .unwrap(),
             );
+            if let crate::state_machine::DownloaderState::PrefixDownload(
+                new_marker_pos,
+            ) = downloader.state
+            {
+                ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                    stats.bytes_need_hashing_locally +=
+                        downloader.remote_metadata.content_length
+                            - new_marker_pos;
+                    stats.bytes_can_reuse -= off_start;
+                    stats.bytes_need_download += new_marker_pos;
+                });
+            }
         }
         _ => {
             panic!("wrong state");
@@ -624,9 +722,15 @@ async fn async_main(
         |downloader: &crate::state_machine::Downloader| {
             matches!(downloader.state, crate::state_machine::DownloaderState::Ok)
         },
-        |_downloader: Box<crate::state_machine::Downloader>| -> Result<(), wuffblob::error::WuffError> {
+        {
+            let ctx: std::sync::Arc<crate::ctx::Ctx> =
+                std::sync::Arc::clone(&ctx);
+        move |_downloader: Box<crate::state_machine::Downloader>| -> Result<(), wuffblob::error::WuffError> {
+            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                stats.files_done += 1;
+            });
             Ok(())
-        },
+        }},
         1000
     );
 
