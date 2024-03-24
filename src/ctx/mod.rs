@@ -246,22 +246,6 @@ impl Ctx {
         self.tokio_runtime.handle()
     }
 
-    pub fn data_concurrency_mgr<T: Send + 'static>(
-        &self,
-    ) -> crate::util::BoundedParallelism<T> {
-        return crate::util::BoundedParallelism::<T>::new(
-            self.data_concurrency,
-        );
-    }
-
-    pub fn metadata_concurrency_mgr<T: Send + 'static>(
-        &self,
-    ) -> crate::util::BoundedParallelism<T> {
-        return crate::util::BoundedParallelism::<T>::new(
-            self.metadata_concurrency,
-        );
-    }
-
     pub fn get_desired_mime_type(
         &self,
         path: &crate::path::WuffPath,

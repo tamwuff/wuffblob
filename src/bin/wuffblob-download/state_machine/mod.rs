@@ -129,7 +129,7 @@ impl Downloader {
     pub fn mkdir_failed(
         &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
+        err: wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, DownloaderState::Mkdir(_)) {
             panic!(
@@ -159,7 +159,7 @@ impl Downloader {
     pub fn open_failed(
         &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
+        err: wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, DownloaderState::Open) {
             panic!(
@@ -251,14 +251,20 @@ impl Downloader {
         if let Some((conflicting_remote_path, conflicting_local_path)) =
             conflict
         {
-            self.set_state_to_local_error(ctx, format!("cannot download {} to {:?} because download of {} to {:?} already in progress, and they are the same file", &self.remote_path, &self.local_path, &conflicting_remote_path, &conflicting_local_path));
+            self.set_state_to_local_error(
+                ctx,
+                format!(
+                    "cannot download {} to {:?} because download of {} to {:?} already in progress, and they are the same file",
+                    &self.remote_path, &self.local_path, &conflicting_remote_path, &conflicting_local_path
+                ),
+            );
         }
     }
 
     pub fn prefix_hash_failed(
         &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
+        err: wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, DownloaderState::PrefixHash(_)) {
             panic!(
@@ -311,17 +317,14 @@ impl Downloader {
     pub fn download_failed(
         &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
+        err: wuffblob::error::WuffError,
     ) {
         if !matches!(
             self.state,
             DownloaderState::SuffixDownload(_, _)
                 | DownloaderState::PrefixDownload(_)
         ) {
-            panic!(
-                "State is {:?}, expected DownloaderState::SuffixDownload or DownloaderState::PrefixDownload",
-                &self.state
-            );
+            panic!("State is {:?}, expected DownloaderState::SuffixDownload or DownloaderState::PrefixDownload", &self.state);
         }
 
         self.set_state_to_remote_error(ctx, err);
@@ -386,7 +389,7 @@ impl Downloader {
     pub fn suffix_hash_failed(
         &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
+        err: wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, DownloaderState::SuffixHash(_, _)) {
             panic!(
@@ -430,7 +433,7 @@ impl Downloader {
     pub fn finalize_failed(
         &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
+        err: wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, DownloaderState::Finalize) {
             panic!(
@@ -634,7 +637,7 @@ fn failed_mkdir_goes_to_error() {
     );
 
     downloader
-        .mkdir_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+        .mkdir_failed(&ctx, wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(downloader.state, DownloaderState::Error(_)),
         "State: {:?}",
@@ -714,8 +717,7 @@ fn failed_open_goes_to_error() {
         &downloader.state
     );
 
-    downloader
-        .open_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    downloader.open_failed(&ctx, wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(downloader.state, DownloaderState::Error(_)),
         "State: {:?}",
@@ -844,7 +846,7 @@ fn failed_prefix_hash_goes_to_err() {
 
     downloader.prefix_hash_failed(
         &ctx,
-        &wuffblob::error::WuffError::from("squeeeee"),
+        wuffblob::error::WuffError::from("squeeeee"),
     );
     assert!(
         matches!(downloader.state, DownloaderState::Error(_)),
@@ -999,7 +1001,7 @@ fn failed_suffix_download_goes_to_err() {
     );
 
     downloader
-        .download_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+        .download_failed(&ctx, wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(downloader.state, DownloaderState::Error(_)),
         "State: {:?}",
@@ -1156,7 +1158,7 @@ fn failed_prefix_download_goes_to_err() {
     );
 
     downloader
-        .download_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+        .download_failed(&ctx, wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(downloader.state, DownloaderState::Error(_)),
         "State: {:?}",
@@ -1260,7 +1262,7 @@ fn failed_suffix_hash_goes_to_err() {
 
     downloader.suffix_hash_failed(
         &ctx,
-        &wuffblob::error::WuffError::from("squeeeee"),
+        wuffblob::error::WuffError::from("squeeeee"),
     );
     assert!(
         matches!(downloader.state, DownloaderState::Error(_)),
@@ -1410,7 +1412,7 @@ fn failed_finalize_goes_to_err() {
     );
 
     downloader
-        .finalize_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+        .finalize_failed(&ctx, wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(downloader.state, DownloaderState::Error(_)),
         "State: {:?}",

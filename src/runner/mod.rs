@@ -1230,12 +1230,7 @@ fn test_runner_with_panic_in_blocking_handler() {
                 &ctx,
                 {
                     let mgr = std::sync::Arc::clone(&mgr);
-                    move |writer: tokio::sync::mpsc::Sender<
-                    Box<TestStateMachine>,
-                >|
-                      -> Result<(), crate::error::WuffError> {
-                    mgr.deterministic_feeder_blocking(writer)
-                }
+                    move |writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>| -> Result<(), crate::error::WuffError> { mgr.deterministic_feeder_blocking(writer) }
                 },
                 100,
             )
@@ -1267,12 +1262,7 @@ fn test_runner_with_panic_in_async_handler() {
                 &ctx,
                 {
                     let mgr = std::sync::Arc::clone(&mgr);
-                    move |writer: tokio::sync::mpsc::Sender<
-                    Box<TestStateMachine>,
-                >|
-                      -> Result<(), crate::error::WuffError> {
-                    mgr.deterministic_feeder_blocking(writer)
-                }
+                    move |writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>| -> Result<(), crate::error::WuffError> { mgr.deterministic_feeder_blocking(writer) }
                 },
                 100,
             )
@@ -1304,12 +1294,7 @@ fn test_runner_with_err_in_terminal_handler() {
                 &ctx,
                 {
                     let mgr = std::sync::Arc::clone(&mgr);
-                    move |writer: tokio::sync::mpsc::Sender<
-                    Box<TestStateMachine>,
-                >|
-                      -> Result<(), crate::error::WuffError> {
-                    mgr.deterministic_feeder_blocking(writer)
-                }
+                    move |writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>| -> Result<(), crate::error::WuffError> { mgr.deterministic_feeder_blocking(writer) }
                 },
                 100,
             )
@@ -1341,12 +1326,7 @@ fn test_runner_with_err_in_blocking_feeder() {
                 &ctx,
                 {
                     let mgr = std::sync::Arc::clone(&mgr);
-                    move |writer: tokio::sync::mpsc::Sender<
-                    Box<TestStateMachine>,
-                >|
-                      -> Result<(), crate::error::WuffError> {
-                    mgr.deterministic_feeder_blocking_err(writer)
-                }
+                    move |writer: tokio::sync::mpsc::Sender<Box<TestStateMachine>>| -> Result<(), crate::error::WuffError> { mgr.deterministic_feeder_blocking_err(writer) }
                 },
                 100,
             )

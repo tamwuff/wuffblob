@@ -251,7 +251,7 @@ fn do_mkdir(
                     } else if !file_type.is_symlink() {
                         downloader.mkdir_failed(
                             ctx,
-                            &format!(
+                            format!(
                                 "{:?} is a {:?}, not a directory",
                                 path, file_type
                             )
@@ -268,7 +268,7 @@ fn do_mkdir(
                     if e.kind() != std::io::ErrorKind::NotFound {
                         downloader.mkdir_failed(
                             ctx,
-                            &format!("{:?}: {}", path, e).into(),
+                            format!("{:?}: {}", path, e).into(),
                         );
                         return;
                     }
@@ -297,7 +297,7 @@ fn do_mkdir(
         if let Err(e) = std::fs::create_dir(path) {
             if e.kind() != std::io::ErrorKind::AlreadyExists {
                 downloader
-                    .mkdir_failed(ctx, &format!("{:?}: {}", path, e).into());
+                    .mkdir_failed(ctx, format!("{:?}: {}", path, e).into());
                 return;
             }
         }
@@ -344,7 +344,7 @@ fn do_open(
             }
         }
         Err(e) => {
-            downloader.open_failed(ctx, &wuffblob::error::WuffError::from(e));
+            downloader.open_failed(ctx, wuffblob::error::WuffError::from(e));
         }
     }
 }
@@ -377,7 +377,7 @@ fn do_prefix_hash(
         }
         Err(e) => {
             downloader
-                .prefix_hash_failed(ctx, &wuffblob::error::WuffError::from(e));
+                .prefix_hash_failed(ctx, wuffblob::error::WuffError::from(e));
             return;
         }
     }
@@ -390,7 +390,7 @@ fn do_prefix_hash(
             buf.as_mut_slice(),
         ) {
             downloader
-                .prefix_hash_failed(ctx, &wuffblob::error::WuffError::from(e));
+                .prefix_hash_failed(ctx, wuffblob::error::WuffError::from(e));
             return;
         }
         <md5::Md5 as md5::Digest>::update(&mut hasher, &buf);
@@ -446,7 +446,7 @@ fn do_suffix_hash(
         }
         Err(e) => {
             downloader
-                .suffix_hash_failed(ctx, &wuffblob::error::WuffError::from(e));
+                .suffix_hash_failed(ctx, wuffblob::error::WuffError::from(e));
             return;
         }
     }
@@ -467,7 +467,7 @@ fn do_suffix_hash(
             ) {
                 downloader.suffix_hash_failed(
                     ctx,
-                    &wuffblob::error::WuffError::from(e),
+                    wuffblob::error::WuffError::from(e),
                 );
                 return;
             }
@@ -489,7 +489,7 @@ fn do_suffix_hash(
             buf.as_mut_slice(),
         ) {
             downloader
-                .suffix_hash_failed(ctx, &wuffblob::error::WuffError::from(e));
+                .suffix_hash_failed(ctx, wuffblob::error::WuffError::from(e));
             return;
         }
         <md5::Md5 as md5::Digest>::update(&mut hasher, &buf);
@@ -537,7 +537,7 @@ async fn do_download(
         }
         Err(e) => {
             downloader
-                .download_failed(&ctx, &wuffblob::error::WuffError::from(e));
+                .download_failed(&ctx, wuffblob::error::WuffError::from(e));
             return downloader;
         }
     }
@@ -551,7 +551,7 @@ async fn do_download(
             downloader.local_file.as_mut().unwrap().set_len(off_start)
         {
             downloader
-                .download_failed(&ctx, &wuffblob::error::WuffError::from(e));
+                .download_failed(&ctx, wuffblob::error::WuffError::from(e));
             return downloader;
         }
     }
@@ -562,7 +562,7 @@ async fn do_download(
             Err(_) => {
                 downloader.download_failed(
                     &ctx,
-                    &wuffblob::error::WuffError::from(
+                    wuffblob::error::WuffError::from(
                         "path is not valid unicode",
                     ),
                 );
@@ -606,7 +606,7 @@ async fn do_download(
                                 ) {
                                     downloader.download_failed(
                                         &ctx,
-                                        &wuffblob::error::WuffError::from(e),
+                                        wuffblob::error::WuffError::from(e),
                                     );
                                     return downloader;
                                 }
@@ -622,10 +622,10 @@ async fn do_download(
                                 );
                             }
                         }
-                        Err(err) => {
+                        Err(ref err) => {
                             downloader.download_failed(
                                 &ctx,
-                                &wuffblob::error::WuffError::from(err),
+                                wuffblob::error::WuffError::from(err),
                             );
                             return downloader;
                         }
@@ -635,7 +635,7 @@ async fn do_download(
             Err(ref err) => {
                 downloader.download_failed(
                     &ctx,
-                    &wuffblob::error::WuffError::from(err),
+                    wuffblob::error::WuffError::from(err),
                 );
                 return downloader;
             }
@@ -644,7 +644,7 @@ async fn do_download(
     if num_bytes_downloaded != expected_len {
         downloader.download_failed(
             &ctx,
-            &wuffblob::error::WuffError::from(format!(
+            wuffblob::error::WuffError::from(format!(
                 "Expected {} bytes, got {} instead",
                 expected_len, num_bytes_downloaded
             )),
@@ -693,11 +693,11 @@ fn do_finalize(
     if let Err(e) =
         downloader.local_file.as_mut().unwrap().set_len(desired_len)
     {
-        downloader.finalize_failed(ctx, &wuffblob::error::WuffError::from(e));
+        downloader.finalize_failed(ctx, wuffblob::error::WuffError::from(e));
         return;
     }
     if let Err(e) = downloader.local_file.as_mut().unwrap().sync_all() {
-        downloader.finalize_failed(ctx, &wuffblob::error::WuffError::from(e));
+        downloader.finalize_failed(ctx, wuffblob::error::WuffError::from(e));
         return;
     }
     downloader.finalize_succeeded(ctx);
@@ -719,29 +719,22 @@ async fn async_main(
 
     runner.handle_terminal(
         &ctx.base_ctx,
-        |downloader: &crate::state_machine::Downloader| {
-            matches!(downloader.state, crate::state_machine::DownloaderState::Ok)
-        },
+        |downloader: &crate::state_machine::Downloader| matches!(downloader.state, crate::state_machine::DownloaderState::Ok),
         {
-            let ctx: std::sync::Arc<crate::ctx::Ctx> =
-                std::sync::Arc::clone(&ctx);
-        move |_downloader: Box<crate::state_machine::Downloader>| -> Result<(), wuffblob::error::WuffError> {
-            ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
-                stats.files_done += 1;
-            });
-            Ok(())
-        }},
-        1000
+            let ctx: std::sync::Arc<crate::ctx::Ctx> = std::sync::Arc::clone(&ctx);
+            move |_downloader: Box<crate::state_machine::Downloader>| -> Result<(), wuffblob::error::WuffError> {
+                ctx.mutate_stats(|stats: &mut crate::ctx::Stats| {
+                    stats.files_done += 1;
+                });
+                Ok(())
+            }
+        },
+        1000,
     );
 
     runner.handle_terminal(
         &ctx.base_ctx,
-        |downloader: &crate::state_machine::Downloader| {
-            matches!(
-                downloader.state,
-                crate::state_machine::DownloaderState::Error(_)
-            )
-        },
+        |downloader: &crate::state_machine::Downloader| matches!(downloader.state, crate::state_machine::DownloaderState::Error(_)),
         |downloader: Box<crate::state_machine::Downloader>| -> Result<(), wuffblob::error::WuffError> {
             if let crate::state_machine::DownloaderState::Error(e) = downloader.state {
                 Err(e.into())
@@ -749,7 +742,7 @@ async fn async_main(
                 panic!("wrong state");
             }
         },
-        1000
+        1000,
     );
 
     runner.handle_nonterminal_blocking(

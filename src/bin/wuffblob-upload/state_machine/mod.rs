@@ -66,7 +66,7 @@ impl Uploader {
     pub fn get_remote_metadata_failed(
         &mut self,
         _ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
+        err: wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, UploaderState::GetRemoteMetadata) {
             panic!(
@@ -152,7 +152,7 @@ impl Uploader {
     pub fn hash_failed(
         &mut self,
         _ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
+        err: wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, UploaderState::Hash) {
             panic!("State is {:?}, expected UploaderState::Hash", &self.state);
@@ -189,7 +189,7 @@ impl Uploader {
     pub fn mkdir_failed(
         &mut self,
         _ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
+        err: wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, UploaderState::Mkdir) {
             panic!(
@@ -215,7 +215,7 @@ impl Uploader {
     pub fn upload_failed(
         &mut self,
         _ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
+        err: wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, UploaderState::Upload(_)) {
             panic!(
@@ -257,7 +257,7 @@ impl Uploader {
     pub fn verify_failed(
         &mut self,
         _ctx: &std::sync::Arc<crate::ctx::Ctx>,
-        err: &wuffblob::error::WuffError,
+        err: wuffblob::error::WuffError,
     ) {
         if !matches!(self.state, UploaderState::Verify) {
             panic!(
@@ -356,7 +356,7 @@ fn dir_goes_to_error_if_get_metadata_fails() {
 
     uploader.get_remote_metadata_failed(
         &ctx,
-        &wuffblob::error::WuffError::from("squeeeee"),
+        wuffblob::error::WuffError::from("squeeeee"),
     );
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
@@ -382,7 +382,7 @@ fn file_goes_to_error_if_get_metadata_fails() {
 
     uploader.get_remote_metadata_failed(
         &ctx,
-        &wuffblob::error::WuffError::from("squeeeee"),
+        wuffblob::error::WuffError::from("squeeeee"),
     );
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
@@ -641,7 +641,7 @@ fn file_goes_to_error_if_local_hashing_fails() {
         &uploader.state
     );
 
-    uploader.hash_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    uploader.hash_failed(&ctx, wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
         "State: {:?}",
@@ -750,7 +750,7 @@ fn dir_goes_to_error_if_mkdir_fails() {
         &uploader.state
     );
 
-    uploader.mkdir_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    uploader.mkdir_failed(&ctx, wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
         "State: {:?}",
@@ -808,8 +808,7 @@ fn file_goes_to_error_if_upload_fails() {
         &uploader.state
     );
 
-    uploader
-        .upload_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    uploader.upload_failed(&ctx, wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
         "State: {:?}",
@@ -1003,8 +1002,7 @@ fn file_goes_to_error_if_verify_fails() {
         &uploader.state
     );
 
-    uploader
-        .verify_failed(&ctx, &wuffblob::error::WuffError::from("squeeeee"));
+    uploader.verify_failed(&ctx, wuffblob::error::WuffError::from("squeeeee"));
     assert!(
         matches!(uploader.state, UploaderState::Error(_)),
         "State: {:?}",

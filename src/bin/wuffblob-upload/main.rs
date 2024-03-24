@@ -191,7 +191,7 @@ async fn do_metadata(
                     crate::state_machine::UploaderState::GetRemoteMetadata => {
                         uploader.get_remote_metadata_failed(
                             &ctx,
-                            &wuffblob::error::WuffError::from(
+                            wuffblob::error::WuffError::from(
                                 "path is not valid unicode",
                             ),
                         );
@@ -199,7 +199,7 @@ async fn do_metadata(
                     crate::state_machine::UploaderState::Mkdir => {
                         uploader.mkdir_failed(
                             &ctx,
-                            &wuffblob::error::WuffError::from(
+                            wuffblob::error::WuffError::from(
                                 "path is not valid unicode",
                             ),
                         );
@@ -234,7 +234,7 @@ async fn do_metadata(
                     } else {
                         uploader.get_remote_metadata_failed(
                             &ctx,
-                            &wuffblob::error::WuffError::from(e),
+                            wuffblob::error::WuffError::from(e),
                         );
                     }
                 }
@@ -305,8 +305,7 @@ fn do_hash(
         match std::fs::File::open(&uploader.local_path) {
             Ok(f) => f,
             Err(e) => {
-                uploader
-                    .hash_failed(ctx, &wuffblob::error::WuffError::from(e));
+                uploader.hash_failed(ctx, wuffblob::error::WuffError::from(e));
                 return;
             }
         }
@@ -319,7 +318,7 @@ fn do_hash(
             buf.resize(num_bytes_left as usize, 0u8);
         }
         if let Err(e) = std::io::Read::read_exact(&mut f, buf.as_mut_slice()) {
-            uploader.hash_failed(ctx, &wuffblob::error::WuffError::from(e));
+            uploader.hash_failed(ctx, wuffblob::error::WuffError::from(e));
             return;
         }
         <md5::Md5 as md5::Digest>::update(&mut hasher, &buf);
@@ -367,7 +366,7 @@ async fn do_upload(
             Err(_) => {
                 uploader.upload_failed(
                     &ctx,
-                    &wuffblob::error::WuffError::from(
+                    wuffblob::error::WuffError::from(
                         "path is not valid unicode",
                     ),
                 );
@@ -406,14 +405,14 @@ async fn do_upload(
             ),
             Err(e) => {
                 uploader
-                    .upload_failed(&ctx, &wuffblob::error::WuffError::from(e));
+                    .upload_failed(&ctx, wuffblob::error::WuffError::from(e));
                 return uploader;
             }
         };
 
     if let crate::state_machine::UploaderState::Upload(true) = uploader.state {
         if let Err(e) = blob_client.delete().into_future().await {
-            uploader.upload_failed(&ctx, &wuffblob::error::WuffError::from(e));
+            uploader.upload_failed(&ctx, wuffblob::error::WuffError::from(e));
             return uploader;
         }
     }
@@ -441,14 +440,14 @@ async fn do_upload(
         if let Err(e) =
             blob_client.put_block(block_id, chunk).into_future().await
         {
-            uploader.upload_failed(&ctx, &wuffblob::error::WuffError::from(e));
+            uploader.upload_failed(&ctx, wuffblob::error::WuffError::from(e));
             return uploader;
         }
     }
     let hash: [u8; 16] = match f.get_hash() {
         Ok(hash) => hash,
         Err(e) => {
-            uploader.upload_failed(&ctx, &e);
+            uploader.upload_failed(&ctx, e);
             return uploader;
         }
     };
@@ -461,7 +460,7 @@ async fn do_upload(
         .into_future()
         .await
     {
-        uploader.upload_failed(&ctx, &wuffblob::error::WuffError::from(e));
+        uploader.upload_failed(&ctx, wuffblob::error::WuffError::from(e));
         return uploader;
     }
     uploader.upload_succeeded(&ctx, hash);
@@ -483,7 +482,7 @@ async fn do_verify(
             Err(_) => {
                 uploader.verify_failed(
                     &ctx,
-                    &wuffblob::error::WuffError::from(
+                    wuffblob::error::WuffError::from(
                         "path is not valid unicode",
                     ),
                 );
@@ -530,7 +529,7 @@ async fn do_verify(
                         Err(err) => {
                             uploader.verify_failed(
                                 &ctx,
-                                &wuffblob::error::WuffError::from(err),
+                                wuffblob::error::WuffError::from(err),
                             );
                             return uploader;
                         }
@@ -540,7 +539,7 @@ async fn do_verify(
             Err(ref err) => {
                 uploader.verify_failed(
                     &ctx,
-                    &wuffblob::error::WuffError::from(err),
+                    wuffblob::error::WuffError::from(err),
                 );
                 return uploader;
             }
@@ -549,7 +548,7 @@ async fn do_verify(
     if num_bytes_hashed != expected_len {
         uploader.verify_failed(
             &ctx,
-            &wuffblob::error::WuffError::from(format!(
+            wuffblob::error::WuffError::from(format!(
                 "Expected {} bytes, got {} instead",
                 expected_len, num_bytes_hashed
             )),
@@ -693,14 +692,8 @@ async fn async_main(
         .run_blocking(
             &ctx.base_ctx,
             {
-                let ctx: std::sync::Arc<crate::ctx::Ctx> =
-                    std::sync::Arc::clone(&ctx);
-                move |writer: tokio::sync::mpsc::Sender<
-                Box<crate::state_machine::Uploader>,
-            >|
-                  -> Result<(), wuffblob::error::WuffError> {
-                feed(&ctx, writer)
-            }
+                let ctx: std::sync::Arc<crate::ctx::Ctx> = std::sync::Arc::clone(&ctx);
+                move |writer: tokio::sync::mpsc::Sender<Box<crate::state_machine::Uploader>>| -> Result<(), wuffblob::error::WuffError> { feed(&ctx, writer) }
             },
             1000,
         )

@@ -243,7 +243,11 @@ fn regex_with_readme_and_makefile() {
 
 #[test]
 fn parse_apache_format() {
-    let mime_types = new("# This is a comment\n  # This is another comment\n# image/jpeg jpg\n  text/plain txt text\n text/x-c c\n#\n", false).unwrap();
+    let mime_types = new(
+        "# This is a comment\n  # This is another comment\n# image/jpeg jpg\n  text/plain txt text\n text/x-c c\n#\n",
+        false,
+    )
+    .unwrap();
     assert_eq!(
         mime_types.get_desired_mime_type(std::ffi::OsStr::new("foo.txt")),
         Some("text/plain")

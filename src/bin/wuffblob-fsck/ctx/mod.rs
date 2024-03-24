@@ -42,6 +42,7 @@ pub struct Ctx {
     pub preen: bool,
     pub yes: bool,
     pub stats: std::sync::Mutex<Stats>,
+    pub user_interaction: std::sync::Mutex<()>,
 }
 
 impl Ctx {
@@ -55,6 +56,7 @@ impl Ctx {
             preen: *(cmdline_matches.get_one::<bool>("preen").unwrap()),
             yes: *(cmdline_matches.get_one::<bool>("yes").unwrap()),
             stats: std::sync::Mutex::new(crate::ctx::Stats::new()),
+            user_interaction: std::sync::Mutex::new(()),
         })
     }
 
@@ -66,6 +68,7 @@ impl Ctx {
             preen: false,
             yes: false,
             stats: std::sync::Mutex::new(crate::ctx::Stats::new()),
+            user_interaction: std::sync::Mutex::new(()),
         }
     }
 
