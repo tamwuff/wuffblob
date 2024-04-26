@@ -187,6 +187,25 @@ fn do_ui(
         print!("\n{}? no\n\n", proposed_repair.question);
         checker.provide_user_input(&ctx, false);
     } else if ctx.preen {
+        // The intention of preen mode is to be an easy, safe, and (reasonably)
+        // fast thing that doesn't make you think. It should never do anything
+        // risky.
+        //
+        // The intention is that if it detects a problem which would be risky
+        // to fix, it shouldn't automatically say yes, but neither should it
+        // let the error escape un-noticed. What it should do is print out
+        // what the problem it found was, and then exit with a nonzero status,
+        // so that the human can go re-run fsck without -p and decide what to
+        // do.
+        //
+        // Right now we don't have any repairs that are risky like that. So
+        // currently we just say yes to everything in preen mode. If some
+        // riskier checks/repairs were added in the future, we could check
+        // to see if this is one of them or not, and say no (and exit with a
+        // nonzero status to let the user know they need to re-run without -p).
+        //
+        // But right now all the repairs we have, are probably pretty safe to
+        // do in preen mode.
         print!("{:?}: {}", name, proposed_repair.problem_statement);
         println!(" ({})", proposed_repair.action);
         checker.provide_user_input(&ctx, true);

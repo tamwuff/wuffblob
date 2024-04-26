@@ -130,28 +130,23 @@ pub fn new(
     data: &'static str,
     is_regex: bool,
 ) -> Result<Box<dyn MimeTypes + Send + Sync>, crate::error::WuffError> {
-    let r: regex::Regex =
-        regex::RegexBuilder::new(r"^\s*([^#]\S*)\s+(\S.*?)\s*$")
-            .multi_line(true)
-            .crlf(true)
-            .build()
-            .expect("regex");
+    // What we really want to do is to make a
+    // Box<dyn MimeTypesPrivate + Send + Sync>, parse all the stuff into it,
+    // and then turn it into a Box<dyn MimeTypes + Send + Sync>. That isn't
+    // supported, at least not in Rust 2021. So we flip it around and make an
+    // inner function to parse all the stuff, and we call that inner function
+    // in each branch of the if.
+    fn parse_into<T: MimeTypesPrivate>(
+        mime_types: &mut T,
+        data: &'static str,
+    ) -> Result<(), crate::error::WuffError> {
+        let r: regex::Regex =
+            regex::RegexBuilder::new(r"^\s*([^#]\S*)\s+(\S.*?)\s*$")
+                .multi_line(true)
+                .crlf(true)
+                .build()
+                .expect("regex");
 
-    // Hmmmm. What I really want to do is to make a Box<dyn MimeTypesPrivate>,
-    // set it to either a MimeTypesRegex or a MimeTypesFixed, and then stop
-    // caring about which one it is. I should be able to fill up my
-    // Box<dyn MimeTypesPrivate> full of stuff no matter what it is
-    // underneath. But then I run into problems when I have to return a
-    // Box<dyn MimeTypes>. Because I don't have a Box<dyn MimeTypes>, and the
-    // thing I do have is a Box<dyn MimeTypesPrivate> and is not convertable
-    // to a Box<dyn MimeTypes>.
-    //
-    // I guess I can copy/paste the code that fills them up... Hnnnngg...
-
-    if is_regex {
-        let mut mime_types: MimeTypesRegex = MimeTypesRegex::new();
-
-        // copied/pasted for loop :-(
         for m in r.captures_iter(data) {
             let mime_type: &'static str = m.get(1).unwrap().as_str();
             let specs: &'static str = m.get(2).unwrap().as_str();
@@ -159,22 +154,18 @@ pub fn new(
                 mime_types.add_mapping(spec, mime_type)?;
             }
         }
+        Ok(())
+    }
 
-        Ok(Box::new(mime_types))
+    Ok(if is_regex {
+        let mut mime_types: MimeTypesRegex = MimeTypesRegex::new();
+        parse_into(&mut mime_types, data)?;
+        Box::new(mime_types)
     } else {
         let mut mime_types: MimeTypesFixed = MimeTypesFixed::new();
-
-        // copied/pasted for loop :-(
-        for m in r.captures_iter(data) {
-            let mime_type: &'static str = m.get(1).unwrap().as_str();
-            let specs: &'static str = m.get(2).unwrap().as_str();
-            for spec in specs.split_whitespace() {
-                mime_types.add_mapping(spec, mime_type)?;
-            }
-        }
-
-        Ok(Box::new(mime_types))
-    }
+        parse_into(&mut mime_types, data)?;
+        Box::new(mime_types)
+    })
 }
 
 #[test]
