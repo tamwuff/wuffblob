@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct WuffPath {
     components: Vec<std::ffi::OsString>,
 }
@@ -137,13 +137,10 @@ impl WuffPath {
     pub fn canonicalize(self) -> Option<WuffPath> {
         let canonicalized_or_componentless: Option<WuffPath> =
             self.canonicalize_or_componentless();
-        match canonicalized_or_componentless {
-            Some(ref canonicalized) => {
-                if canonicalized.is_componentless() {
-                    return None;
-                }
+        if let Some(ref canonicalized) = canonicalized_or_componentless {
+            if canonicalized.is_componentless() {
+                return None;
             }
-            _ => {}
         }
         canonicalized_or_componentless
     }
@@ -185,8 +182,8 @@ impl WuffPath {
     where
         T: IntoIterator<Item = &'a WuffPath>,
     {
-        let mut as_set: std::collections::BTreeSet<&'a WuffPath> =
-            std::collections::BTreeSet::new();
+        let mut as_set: std::collections::HashSet<&'a WuffPath> =
+            std::collections::HashSet::new();
         for path in paths {
             // caller should have ensured this
             assert!(path.is_componentless() || path.is_canonical());

@@ -213,10 +213,10 @@ impl Ctx {
     #[cfg(unix)]
     pub fn install_siginfo_handler<F>(
         &self,
-        cb: F,
+        mut cb: F,
     ) -> Result<(), crate::error::WuffError>
     where
-        F: Fn() + Send + 'static,
+        F: FnMut() + Send + 'static,
     {
         let sig_num: tokio::signal::unix::SignalKind =
             what_is_siginfo_on_this_platform();

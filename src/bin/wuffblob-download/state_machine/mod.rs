@@ -218,7 +218,7 @@ impl Downloader {
             let mut in_flight = ctx.in_flight.lock().expect("download");
             let num_in_flight: usize = in_flight.len();
             match in_flight.entry(dev_ino.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
+                std::collections::hash_map::Entry::Vacant(entry) => {
                     self.dev_ino = Some(dev_ino);
                     entry.insert((
                         self.remote_path.clone(),
@@ -226,7 +226,7 @@ impl Downloader {
                     ));
                     (num_in_flight + 1, None)
                 }
-                std::collections::btree_map::Entry::Occupied(entry) => {
+                std::collections::hash_map::Entry::Occupied(entry) => {
                     (num_in_flight, Some(entry.get().clone()))
                 }
             }

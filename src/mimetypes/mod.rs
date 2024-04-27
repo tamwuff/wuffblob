@@ -26,13 +26,13 @@ trait MimeTypesPrivate: MimeTypes {
 
 #[derive(Debug)]
 pub struct MimeTypesFixed {
-    data: std::collections::BTreeMap<std::ffi::OsString, &'static str>,
+    data: std::collections::HashMap<std::ffi::OsString, &'static str>,
 }
 
 impl MimeTypesFixed {
     fn new() -> Self {
         MimeTypesFixed {
-            data: std::collections::BTreeMap::new(),
+            data: std::collections::HashMap::new(),
         }
     }
 }
