@@ -99,6 +99,7 @@ impl Uploader {
     pub fn provide_remote_metadata(
         &mut self,
         ctx: &std::sync::Arc<crate::ctx::Ctx>,
+        remote_is_dir: bool,
         remote_metadata: azure_storage_blobs::blob::BlobProperties,
     ) {
         if !matches!(self.state, UploaderState::GetRemoteMetadata) {
@@ -110,13 +111,6 @@ impl Uploader {
         self.remote_metadata = Some(remote_metadata);
         let remote_metadata: &azure_storage_blobs::blob::BlobProperties =
             self.remote_metadata.as_ref().unwrap();
-
-        let mut remote_is_dir: bool = false;
-        if let Some(ref resource_type) = remote_metadata.resource_type {
-            if resource_type == "directory" {
-                remote_is_dir = true;
-            }
-        }
 
         if self.local_metadata.file_type().is_file() {
             if remote_is_dir {
@@ -454,6 +448,7 @@ fn dir_goes_to_error_if_remote_metadata_indicates_file() {
 
     uploader.provide_remote_metadata(
         &ctx,
+        false,
         wuffblob::util::fake_blob_properties_file(
             "text/plain",
             42,
@@ -484,6 +479,7 @@ fn file_goes_to_error_if_remote_metadata_indicates_dir() {
 
     uploader.provide_remote_metadata(
         &ctx,
+        true,
         wuffblob::util::fake_blob_properties_directory(),
     );
     assert!(
@@ -510,6 +506,7 @@ fn dir_goes_to_ok_if_already_exists() {
 
     uploader.provide_remote_metadata(
         &ctx,
+        true,
         wuffblob::util::fake_blob_properties_directory(),
     );
     assert!(
@@ -538,6 +535,7 @@ fn file_goes_to_error_if_remote_metadata_indicates_wrong_size_and_not_force() {
 
     uploader.provide_remote_metadata(
         &ctx,
+        false,
         wuffblob::util::fake_blob_properties_file(
             "text/plain",
             42,
@@ -570,6 +568,7 @@ fn file_goes_to_upload_if_remote_metadata_indicates_wrong_size_and_force() {
 
     uploader.provide_remote_metadata(
         &ctx,
+        false,
         wuffblob::util::fake_blob_properties_file(
             "text/plain",
             42,
@@ -600,6 +599,7 @@ fn file_goes_to_hash_if_remote_metadata_indicates_correct_size() {
 
     uploader.provide_remote_metadata(
         &ctx,
+        false,
         wuffblob::util::fake_blob_properties_file(
             "text/plain",
             23,
@@ -629,6 +629,7 @@ fn file_goes_to_error_if_local_hashing_fails() {
     );
     uploader.provide_remote_metadata(
         &ctx,
+        false,
         wuffblob::util::fake_blob_properties_file(
             "text/plain",
             23,
@@ -669,6 +670,7 @@ fn file_goes_to_error_if_hash_is_wrong_and_not_force() {
     );
     uploader.provide_remote_metadata(
         &ctx,
+        false,
         wuffblob::util::fake_blob_properties_file(
             "text/plain",
             23,
@@ -709,6 +711,7 @@ fn file_goes_to_upload_if_hash_is_wrong_and_force() {
     );
     uploader.provide_remote_metadata(
         &ctx,
+        false,
         wuffblob::util::fake_blob_properties_file(
             "text/plain",
             23,
@@ -836,6 +839,7 @@ fn file_goes_to_error_if_upload_succeeds_with_wrong_hash() {
     );
     uploader.provide_remote_metadata(
         &ctx,
+        false,
         wuffblob::util::fake_blob_properties_file(
             "text/plain",
             23,
@@ -882,6 +886,7 @@ fn file_goes_to_ok_if_upload_succeeds_with_correct_hash() {
     );
     uploader.provide_remote_metadata(
         &ctx,
+        false,
         wuffblob::util::fake_blob_properties_file(
             "text/plain",
             23,

@@ -221,8 +221,12 @@ async fn do_metadata(
                 .blob_client(filename_as_string);
             match blob_client.get_properties().into_future().await {
                 Ok(resp) => {
-                    uploader
-                        .provide_remote_metadata(&ctx, resp.blob.properties);
+                    let is_dir: bool = wuffblob::util::blob_is_dir(&resp.blob);
+                    uploader.provide_remote_metadata(
+                        &ctx,
+                        is_dir,
+                        resp.blob.properties,
+                    );
                 }
                 Err(e) => {
                     if let azure_core::error::ErrorKind::HttpResponse {

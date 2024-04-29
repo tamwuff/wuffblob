@@ -141,7 +141,7 @@ pub fn new(
         data: &'static str,
     ) -> Result<(), crate::error::WuffError> {
         let r: regex::Regex =
-            regex::RegexBuilder::new(r"^\s*([^#]\S*)\s+(\S.*?)\s*$")
+            regex::RegexBuilder::new(r"^\s*([^#]\S+)\s+(\S.*?)\s*$")
                 .multi_line(true)
                 .crlf(true)
                 .build()
